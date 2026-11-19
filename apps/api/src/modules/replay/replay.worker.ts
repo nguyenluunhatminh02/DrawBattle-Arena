@@ -68,11 +68,15 @@ export class ReplayWorker {
           this.logger.warn(`Max concurrent reached, stopping batch`);
           break;
         }
-        try {
-          await this.renderInWorker(replay.id, replay.strokes as any[], replay.durationMs);
-        } catch (err) {
-          this.logger.error(`Failed to render replay ${replay.id}`, err instanceof Error ? err.message : String(err));
-        }
+        const job = this.renderInWorker(replay.id, replay.strokes as any[], replay.durationMs)
+          .catch(err => {
+            this.logger.error(`Failed to render replay ${replay.id}`, err instanceof Error ? err.message : String(err));
+          })
+          .finally(() => {
+            this.activeJobs.delete(replay.id);
+          });
+        this.activeJobs.set(replay.id, job);
+        await job;
       }
     } finally {
       this.isRendering = false;

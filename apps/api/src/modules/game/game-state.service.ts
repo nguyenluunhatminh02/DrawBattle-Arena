@@ -231,12 +231,14 @@ export class GameStateService {
   getSnapshot(roomId: string) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
-    const { password, ...safeSettings } = room.settings;
+    const settings = room.settings as Record<string, unknown>;
+    const hasPassword = Boolean(settings.passwordHash || settings.password);
+    const { password: _p, passwordHash: _h, ...safeSettings } = settings;
     return {
       id: room.roomId,
       code: '',
       hostId: room.hostId,
-      hasPassword: Boolean(password),
+      hasPassword,
       players: Array.from(room.players.values()).map(p => this.toPlayerInfo(p)),
       settings: safeSettings,
       status: room.match ? 'PLAYING' : 'WAITING',

@@ -29,6 +29,9 @@ export class ChallengeService {
     options?: { difficulty?: WordDifficulty; category?: string; wordId?: string },
     creator?: Identity,
   ) {
+    if (!creator?.userId && !creator?.sessionId) {
+      throw new BadRequestException('Authentication required to create a challenge');
+    }
     let word: { id: string; canonical: string };
     if (options?.wordId) {
       const found = await this.prisma.word.findFirst({
