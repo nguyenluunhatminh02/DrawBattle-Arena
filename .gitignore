@@ -13,3 +13,7 @@ coverage
 *.swo
 *~
 .turbo
+apps/api/public/replays/*.gif
+apps/web/test-results/
+apps/web/playwright-report/
+*.tsbuildinfo

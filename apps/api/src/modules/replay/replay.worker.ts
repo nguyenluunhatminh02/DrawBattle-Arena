@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
-import { renderStrokesToGif } from './gif-renderer';
 import { writeFile, mkdir, unlink } from 'fs/promises';
 import { join } from 'path';
+import { Worker } from 'worker_threads';
+import { existsSync } from 'fs';
 
 @Injectable()
 export class ReplayWorker {
@@ -15,13 +16,11 @@ export class ReplayWorker {
 
   async queueRender(replayId: string, strokes: any[], durationMs: number): Promise<string> {
     this.logger.log(`Queued render for replay ${replayId}`);
-    setImmediate(() => {
-      void this.processRender(replayId, strokes, durationMs).catch(err => {
-        this.logger.error(
-          `Queued render failed for ${replayId}`,
-          err instanceof Error ? err.message : String(err),
-        );
-      });
+    void this.renderInWorker(replayId, strokes, durationMs).catch(err => {
+      this.logger.error(
+        `Queued render failed for ${replayId}`,
+        err instanceof Error ? err.message : String(err),
+      );
     });
     return replayId;
   }
@@ -44,7 +43,7 @@ export class ReplayWorker {
     try {
       for (const replay of pending) {
         try {
-          await this.processRender(replay.id, replay.strokes as any[], replay.durationMs);
+          await this.renderInWorker(replay.id, replay.strokes as any[], replay.durationMs);
         } catch (err) {
           this.logger.error(`Failed to render replay ${replay.id}`, err instanceof Error ? err.message : String(err));
         }
@@ -54,32 +53,61 @@ export class ReplayWorker {
     }
   }
 
-  private async processRender(replayId: string, strokes: any[], durationMs: number) {
-    try {
-      await mkdir(this.renderDir, { recursive: true });
+  private renderInWorker(replayId: string, strokes: any[], durationMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const workerPath = join(__dirname, 'gif-worker.js');
+      if (!existsSync(workerPath)) {
+        reject(new Error(`gif-worker.js not found at ${workerPath}`));
+        return;
+      }
 
-      const gifBuffer = await renderStrokesToGif(strokes, durationMs, {
-        width: 640,
-        height: 400,
-        fps: 10,
-        backgroundColor: '#FFFFFF',
+      const worker = new Worker(workerPath, {
+        workerData: {
+          strokes,
+          durationMs,
+          options: {
+            width: 640,
+            height: 400,
+            fps: 10,
+            backgroundColor: '#FFFFFF',
+          },
+        },
       });
 
-      const filename = `${replayId}.gif`;
-      const filepath = join(this.renderDir, filename);
-      await writeFile(filepath, gifBuffer);
+      worker.on('message', async (result: Buffer | { error: string }) => {
+        if (result && typeof result === 'object' && 'error' in result) {
+          reject(new Error((result as { error: string }).error));
+          return;
+        }
 
-      const gifUrl = `/replays/${filename}`;
-      await this.prisma.replay.update({
-        where: { id: replayId },
-        data: { gifUrl },
+        try {
+          const gifBuffer = result as Buffer;
+          await mkdir(this.renderDir, { recursive: true });
+
+          const filename = `${replayId}.gif`;
+          const filepath = join(this.renderDir, filename);
+          await writeFile(filepath, gifBuffer);
+
+          const gifUrl = `/replays/${filename}`;
+          await this.prisma.replay.update({
+            where: { id: replayId },
+            data: { gifUrl },
+          });
+
+          this.logger.log(`Rendered replay ${replayId} -> ${gifUrl} (${gifBuffer.length} bytes)`);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
       });
 
-      this.logger.log(`Rendered replay ${replayId} -> ${gifUrl} (${gifBuffer.length} bytes)`);
-    } catch (err) {
-      this.logger.error(`Render failed for ${replayId}`, err instanceof Error ? err.message : String(err));
-      throw err;
-    }
+      worker.on('error', reject);
+      worker.on('exit', code => {
+        if (code !== 0) {
+          reject(new Error(`Worker exited with code ${code}`));
+        }
+      });
+    });
   }
 
   async cleanupOldReplays(maxAgeDays = 30) {
