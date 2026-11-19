@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: drawbattle
+          POSTGRES_PASSWORD: drawbattle
+          POSTGRES_DB: drawbattle
+        ports:
+          - 5440:5432
+        options: >-
+          --health-cmd "pg_isready -U drawbattle"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared
+        run: pnpm --filter @drawbattle/shared build
+
+      - name: Generate Prisma client
+        run: pnpm --filter @drawbattle/api exec prisma generate
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+        run: pnpm --filter @drawbattle/api exec prisma migrate deploy
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Unit tests
+        run: pnpm --filter @drawbattle/api test
+
+      - name: Build API
+        run: pnpm --filter @drawbattle/api build
+
+      - name: Build Web
+        run: pnpm --filter @drawbattle/web build
+
+      - name: Seed database
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+        run: pnpm --filter @drawbattle/api db:seed

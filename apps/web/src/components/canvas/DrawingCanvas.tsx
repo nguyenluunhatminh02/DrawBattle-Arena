@@ -163,7 +163,38 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
     if (!point) return;
     currentStrokeRef.current.points.push(point);
     pendingPointsRef.current.push(point);
-    redraw();
+    drawIncremental(point);
+  };
+
+  const drawIncremental = (point: { x: number; y: number }) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx || !currentStrokeRef.current) return;
+    const dpr = dprRef.current;
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+    const stroke = currentStrokeRef.current;
+    const pts = stroke.points;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = stroke.isEraser ? '#FFFFFF' : stroke.color;
+    ctx.fillStyle = stroke.isEraser ? '#FFFFFF' : stroke.color;
+    ctx.lineWidth = stroke.isEraser ? Math.min(20, stroke.width * 3) : stroke.width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0].x * w, pts[0].y * h, ctx.lineWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      const prev = pts[pts.length - 2];
+      ctx.moveTo(prev.x * w, prev.y * h);
+      ctx.lineTo(point.x * w, point.y * h);
+      ctx.stroke();
+    }
+    ctx.restore();
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {

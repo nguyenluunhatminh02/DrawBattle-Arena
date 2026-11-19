@@ -5,9 +5,20 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { generateRoomCode, getModeConfig, GAME_CONSTANTS } from '@drawbattle/shared';
 import type { RoomSettings } from '@drawbattle/shared';
+
+function hashRoomPassword(password: string): string {
+  return createHash('sha256').update(`room-pwd:${password}`).digest('hex');
+}
+
+function verifyRoomPassword(password: string | undefined, hash: string | undefined): boolean {
+  if (!hash) return true;
+  if (!password) return false;
+  return hashRoomPassword(password) === hash;
+}
 
 const DEFAULT_SETTINGS: RoomSettings = {
   maxPlayers: 8,
@@ -31,6 +42,10 @@ export class RoomService {
     settings?: Partial<RoomSettings>,
   ) {
     const merged: RoomSettings = { ...DEFAULT_SETTINGS, ...settings };
+    if (merged.password) {
+      (merged as any).passwordHash = hashRoomPassword(merged.password);
+      delete (merged as any).password;
+    }
     const modeConfig = getModeConfig(merged.mode);
     const finalSettings: RoomSettings = {
       ...merged,
@@ -142,8 +157,8 @@ export class RoomService {
       if (room.status !== 'WAITING') {
         throw new BadRequestException('Game already in progress');
       }
-      const settings = room.settings as unknown as RoomSettings;
-      if (settings.password && settings.password !== password) {
+      const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
+      if (settings.passwordHash && !verifyRoomPassword(password, settings.passwordHash)) {
         throw new BadRequestException('Invalid password');
       }
       if (room.players.length >= settings.maxPlayers) {
@@ -169,7 +184,7 @@ export class RoomService {
         playerId: player.id,
       };
     }, {
-      isolationLevel: 'ReadCommitted',
+      isolationLevel: 'Serializable',
       maxWait: 5000,
       timeout: 10000,
     });

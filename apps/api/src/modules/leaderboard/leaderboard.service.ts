@@ -74,20 +74,28 @@ export class LeaderboardService implements OnModuleInit {
       .sort((a, b) => b[1].points - a[1].points)
       .slice(0, 100);
 
-    await this.prisma.leaderboardSnapshot.deleteMany({ where: { period } });
+    const batchId = `lb_${period}_${Date.now()}`;
+    const newData = ranked.map(([userId, entry], index) => ({
+      id: `${batchId}_${index}`,
+      period,
+      rank: index + 1,
+      userId,
+      nickname: entry.nickname,
+      points: entry.points,
+      wins: 0,
+    }));
 
-    if (ranked.length > 0) {
-      await this.prisma.leaderboardSnapshot.createMany({
-        data: ranked.map(([userId, entry], index) => ({
+    await this.prisma.$transaction(async (tx) => {
+      if (newData.length > 0) {
+        await tx.leaderboardSnapshot.createMany({ data: newData });
+      }
+      await tx.leaderboardSnapshot.deleteMany({
+        where: {
           period,
-          rank: index + 1,
-          userId,
-          nickname: entry.nickname,
-          points: entry.points,
-          wins: 0,
-        })),
+          id: { notIn: newData.map(d => d.id) },
+        },
       });
-    }
+    });
   }
 
   async getLeaderboard(period: 'daily' | 'weekly' | 'alltime' = 'alltime') {

@@ -11,12 +11,30 @@ export class AccountService {
   ) {}
 
   async register(email: string, password: string, nickname: string) {
-    const existing = await this.prisma.user.findUnique({ where: { email } });
+    const normalizedEmail = email.trim().toLowerCase();
+    const trimmedNickname = nickname.trim();
+    if (!normalizedEmail || !/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+      throw new BadRequestException('Invalid email format');
+    }
+    if (!password || password.length < 6 || password.length > 72) {
+      throw new BadRequestException('Password must be 6-72 characters');
+    }
+    if (!trimmedNickname || trimmedNickname.length > 20 || !/^[\p{L}\p{N} _-]+$/u.test(trimmedNickname)) {
+      throw new BadRequestException('Invalid nickname: 1-20 characters, letters/numbers/spaces/_/- only');
+    }
+    const existing = await this.prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (existing) {
       throw new BadRequestException('Email already registered');
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
+    const user = await this.prisma.user.create({
+      data: {
+        email: normalizedEmail,
+        passwordHash,
+        nickname: trimmedNickname,
+      },
+    });
     const user = await this.prisma.user.create({
       data: {
         email,
@@ -30,7 +48,8 @@ export class AccountService {
   }
 
   async login(email: string, password: string) {
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await this.prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (!user || !user.passwordHash) {
       throw new UnauthorizedException('Invalid credentials');
     }

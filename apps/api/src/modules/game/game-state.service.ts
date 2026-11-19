@@ -895,6 +895,9 @@ export class GameStateService {
     target.isHost = true;
     room.hostId = targetId;
     this.emit(roomId, { type: 'room:hostChanged', payload: targetId });
+    void this.prisma.room
+      .update({ where: { id: roomId }, data: { hostPlayerId: targetId } })
+      .catch(err => this.logger.error('Failed to persist host transfer', err instanceof Error ? err.message : String(err)));
     return true;
   }
 
