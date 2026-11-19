@@ -1,5 +1,6 @@
 import { Controller, Get, Post, Param, Res } from '@nestjs/common';
 import { ReplayService } from './replay.service';
+import { Throttle } from '../../common/throttle.guard';
 import type { Response } from 'express';
 
 @Controller('replays')
@@ -17,6 +18,7 @@ export class ReplayController {
   }
 
   @Post(':id/render')
+  @Throttle({ limit: 3, windowMs: 60_000, keyPrefix: 'replay-render' })
   async queueRender(@Param('id') id: string) {
     return this.replayService.queueRender(id);
   }

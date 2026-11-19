@@ -513,6 +513,8 @@ export class GameSocketGateway
     }
     const turn = this.game.getTurnSnapshot(roomId);
     if (turn) socket.emit('turn:restore', turn);
+    const word = this.game.getDrawerWord(roomId, playerId);
+    if (word) socket.emit('turn:yourWord', { word });
   }
 
   private dispatchRoomEvent(roomId: string, event: RoomEvent) {

@@ -15,8 +15,10 @@ export class ChallengeController {
   }
 
   @Post(':id/finalize')
+  @UseGuards(OptionalAuthGuard)
   finalize(
     @Param('id') id: string,
+    @Req() req: any,
     @Body()
     body: {
       strokes: Array<{
@@ -28,12 +30,15 @@ export class ChallengeController {
       durationMs: number;
     },
   ) {
-    return this.challenge.finalize(id, body.strokes, body.durationMs);
+    const creatorSessionId = req.guest?.sessionId || req.user?.id;
+    return this.challenge.finalize(id, body.strokes, body.durationMs, creatorSessionId);
   }
 
   @Get(':id')
-  info(@Param('id') id: string) {
-    return this.challenge.getInfo(id);
+  @UseGuards(OptionalAuthGuard)
+  info(@Param('id') id: string, @Req() req: any) {
+    const solverId = req.user?.id || req.guest?.sessionId;
+    return this.challenge.getInfo(id, solverId);
   }
 
   @Post(':id/guesses')

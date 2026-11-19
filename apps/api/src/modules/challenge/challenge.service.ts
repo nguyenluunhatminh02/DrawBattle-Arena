@@ -64,7 +64,15 @@ export class ChallengeService {
       width: number;
     }>,
     durationMs: number,
+    creatorSessionId?: string,
   ) {
+    if (!Array.isArray(strokes) || strokes.length > 500) {
+      throw new BadRequestException('Invalid strokes payload');
+    }
+    if (!Number.isInteger(durationMs) || durationMs < 1000 || durationMs > 30000) {
+      throw new BadRequestException('Invalid duration');
+    }
+
     const challenge = await this.prisma.challenge.findUnique({
       where: { id: challengeId },
     });
@@ -72,32 +80,35 @@ export class ChallengeService {
     if (challenge.status !== 'ACTIVE') {
       throw new BadRequestException('Challenge not active');
     }
+    if (challenge.replayId) {
+      throw new BadRequestException('Challenge already finalized');
+    }
+    if (challenge.creatorId && creatorSessionId && challenge.creatorId !== creatorSessionId) {
+      throw new BadRequestException('Only the creator can finalize');
+    }
 
-    const replay = await this.prisma.replay.create({
-      data: {
-        challengeId,
-        strokes,
-        durationMs,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const replay = await tx.replay.create({
+        data: { challengeId, strokes: strokes as any, durationMs },
+      });
+      await tx.challenge.update({
+        where: { id: challengeId },
+        data: { replayId: replay.id },
+      });
+      return { ok: true };
     });
-
-    await this.prisma.challenge.update({
-      where: { id: challengeId },
-      data: { replayId: replay.id },
-    });
-
-    return { ok: true };
   }
 
-  async getInfo(challengeId: string) {
+  async getInfo(challengeId: string, solverId?: string) {
     const challenge = await this.prisma.challenge.findUnique({
       where: { id: challengeId },
-      include: {
-        replay: true,
-        attempts: true,
-      },
+      include: { replay: true, attempts: true },
     });
     if (!challenge) throw new NotFoundException('Challenge not found');
+
+    const myAttempts = solverId
+      ? challenge.attempts.filter(a => a.solverId === solverId)
+      : [];
 
     return {
       challengeId: challenge.id,
@@ -112,6 +123,7 @@ export class ChallengeService {
           }
         : null,
       attemptCount: challenge.attempts.length,
+      myAttempts: myAttempts.length,
       maxAttempts: GAME_CONSTANTS.MAX_CHALLENGE_ATTEMPTS,
     };
   }
@@ -129,9 +141,10 @@ export class ChallengeService {
       throw new BadRequestException('Challenge not finalized');
     }
 
-    const priorAttempts = challenge.attempts.filter(
-      a => a.solverId === solverId || (!solverId && !a.solverId),
-    );
+    const priorAttempts = solverId
+      ? challenge.attempts.filter(a => a.solverId === solverId)
+      : [];
+
     if (priorAttempts.some(a => a.correct)) {
       throw new BadRequestException('Already solved');
     }

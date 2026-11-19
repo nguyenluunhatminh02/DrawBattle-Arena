@@ -71,6 +71,7 @@ interface MatchState {
   completedTurns: CompletedTurn[];
   turnDuration?: number;
   enableHints?: boolean;
+  startedAt: number;
 }
 
 interface TurnState {
@@ -106,6 +107,7 @@ export class GameStateService {
   private readonly logger = new Logger(GameStateService.name);
   private readonly rooms = new Map<string, RoomState>();
   private readonly sinks = new Map<string, EventSink>();
+  private readonly locks = new Map<string, Promise<void>>();
 
   constructor(
     private readonly wordService: WordService,
@@ -119,6 +121,20 @@ export class GameStateService {
 
   unregisterSink(roomId: string) {
     this.sinks.delete(roomId);
+  }
+
+  private withLock<T>(roomId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(roomId) ?? Promise.resolve();
+    let release: () => void;
+    const gate = new Promise<void>(r => (release = r));
+    const next = prev.then(() => gate);
+    this.locks.set(roomId, next);
+    return prev.then(() => fn()).finally(() => {
+      release!();
+      if (this.locks.get(roomId) === next) {
+        this.locks.delete(roomId);
+      }
+    });
   }
 
   initRoom(
@@ -186,6 +202,7 @@ export class GameStateService {
     room.players.delete(playerId);
     if (room.players.size === 0) {
       this.rooms.delete(roomId);
+      this.unregisterSink(roomId);
       return null;
     }
     if (room.hostId === playerId) {
@@ -233,98 +250,93 @@ export class GameStateService {
   }
 
   async startMatch(roomId: string): Promise<boolean> {
-    const room = this.rooms.get(roomId);
-    if (!room) return false;
+    return this.withLock(roomId, async () => {
+      const room = this.rooms.get(roomId);
+      if (!room) return false;
 
-    const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');
-    const eligible = Array.from(room.players.values()).filter(p => !p.isKicked);
-    if (eligible.length < modeConfig.minPlayers) return false;
-    if (room.match) return false;
+      const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');
+      const eligible = Array.from(room.players.values()).filter(p => !p.isKicked);
+      if (eligible.length < modeConfig.minPlayers) return false;
+      if (room.match) return false;
 
-    void this.prisma.room
-      .update({ where: { id: roomId }, data: { status: 'PLAYING' } })
-      .catch(() => undefined);
+      room.match = { id: '__starting__', rounds: 0, totalTurns: 0, currentRound: 0, drawerOrder: [], currentDrawerIndex: 0, turn: null, completedTurns: [], startedAt: Date.now() } as MatchState;
 
-    let turnDuration =
-      room.settings.mode === 'SPEED' || room.settings.mode === 'DUEL'
-        ? modeConfig.turnDuration
-        : room.settings.turnDuration;
-    let enableHints = room.settings.enableHints;
-    if ((room.settings.mode || 'CLASSIC') === 'CLASSIC') {
-      const durationFlag = await this.featureFlags.find('classic_turn_duration');
-      if (durationFlag?.enabled && durationFlag.variant) {
-        const variant = parseInt(durationFlag.variant, 10);
-        if (Number.isFinite(variant) && variant >= 10 && variant <= 180) {
-          turnDuration = variant;
+      void this.prisma.room
+        .update({ where: { id: roomId }, data: { status: 'PLAYING' } })
+        .catch(() => undefined);
+
+      let turnDuration =
+        room.settings.mode === 'SPEED' || room.settings.mode === 'DUEL'
+          ? modeConfig.turnDuration
+          : room.settings.turnDuration;
+      let enableHints = room.settings.enableHints;
+      if ((room.settings.mode || 'CLASSIC') === 'CLASSIC') {
+        const durationFlag = await this.featureFlags.find('classic_turn_duration');
+        if (durationFlag?.enabled && durationFlag.variant) {
+          const variant = parseInt(durationFlag.variant, 10);
+          if (Number.isFinite(variant) && variant >= 10 && variant <= 180) {
+            turnDuration = variant;
+          }
         }
+        const hintsFlag = await this.featureFlags.find('classic_hints');
+        if (hintsFlag) enableHints = hintsFlag.enabled;
       }
-      const hintsFlag = await this.featureFlags.find('classic_hints');
-      if (hintsFlag) enableHints = hintsFlag.enabled;
-    }
 
-    const drawerOrder = this.shuffle(eligible.slice(0, modeConfig.maxPlayers).map(p => p.id));
-    const matchId = uuid();
-    const rounds = room.settings.mode === 'DUEL' ? modeConfig.rounds : room.settings.rounds;
-    const totalTurns =
-      room.settings.mode === 'DUEL'
-        ? modeConfig.rounds
-        : rounds * drawerOrder.length;
-    room.match = {
-      id: matchId,
-      rounds,
-      totalTurns,
-      currentRound: 1,
-      drawerOrder,
-      currentDrawerIndex: 0,
-      turn: null,
-      completedTurns: [],
-      turnDuration,
-      enableHints,
-    };
-
-    for (const p of room.players.values()) {
-      p.score = 0;
-    }
-
-    if (room.settings.mode === 'TEAM') {
-      const shuffled = this.shuffle(drawerOrder);
-      const mid = Math.ceil(shuffled.length / 2);
-      room.teams = {
-        teamA: shuffled.slice(0, mid),
-        teamB: shuffled.slice(mid),
+      const drawerOrder = this.shuffle(eligible.slice(0, modeConfig.maxPlayers).map(p => p.id));
+      const matchId = uuid();
+      const rounds = room.settings.mode === 'DUEL' ? modeConfig.rounds : room.settings.rounds;
+      const totalTurns =
+        room.settings.mode === 'DUEL' ? modeConfig.rounds : rounds * drawerOrder.length;
+      room.match = {
+        id: matchId,
+        rounds,
+        totalTurns,
+        currentRound: 1,
+        drawerOrder,
+        currentDrawerIndex: 0,
+        turn: null,
+        completedTurns: [],
+        turnDuration,
+        enableHints,
+        startedAt: Date.now(),
       };
-      const toMembers = (ids: string[]) =>
-        ids.map(id => ({ id, nickname: room.players.get(id)?.nickname ?? '?' }));
+
+      for (const p of room.players.values()) {
+        p.score = 0;
+      }
+
+      if (room.settings.mode === 'TEAM') {
+        const shuffled = this.shuffle(drawerOrder);
+        const mid = Math.ceil(shuffled.length / 2);
+        room.teams = {
+          teamA: shuffled.slice(0, mid),
+          teamB: shuffled.slice(mid),
+        };
+        const toMembers = (ids: string[]) =>
+          ids.map(id => ({ id, nickname: room.players.get(id)?.nickname ?? '?' }));
+        this.emit(roomId, {
+          type: 'match:teams',
+          payload: { teamA: toMembers(room.teams.teamA), teamB: toMembers(room.teams.teamB) },
+        });
+      } else {
+        room.teams = undefined;
+      }
+
       this.emit(roomId, {
-        type: 'match:teams',
-        payload: {
-          teamA: toMembers(room.teams.teamA),
-          teamB: toMembers(room.teams.teamB),
-        },
+        type: 'match:started',
+        payload: { matchId, round: 1, totalRounds: rounds, drawerOrder: drawerOrder.map(id => ({ id, nickname: room.players.get(id)?.nickname || '?' })) },
       });
-    } else {
-      room.teams = undefined;
-    }
 
-    this.emit(roomId, {
-      type: 'match:started',
-      payload: { matchId, round: 1, totalRounds: rounds, drawerOrder: drawerOrder.map(id => ({ id, nickname: room.players.get(id)?.nickname || '?' })) },
+      await this.startWordPickPhase(roomId);
+      return true;
     });
-
-    await this.startWordPickPhase(roomId);
-    return true;
   }
 
   private async startWordPickPhase(roomId: string) {
     const room = this.rooms.get(roomId);
-    if (!room || !room.match) {
-      return;
-    }
+    if (!room || !room.match) return;
 
-    const drawerId =
-      room.match.drawerOrder[
-        room.match.currentDrawerIndex % room.match.drawerOrder.length
-      ];
+    const drawerId = room.match.drawerOrder[room.match.currentDrawerIndex % room.match.drawerOrder.length];
     const options = await this.wordService.pickRandomWords(3, {
       difficulty: room.settings.difficulty,
       category: room.settings.category,
@@ -384,26 +396,29 @@ export class GameStateService {
   }
 
   async chooseWord(roomId: string, playerId: string, wordId: string): Promise<boolean> {
-    const room = this.rooms.get(roomId);
-    const turn = room?.match?.turn;
-    if (!room || !turn || turn.phase !== 'WORD_PICK') return false;
-    if (turn.drawerId !== playerId) return false;
-    const option = turn.wordOptions.find(w => w.id === wordId);
-    if (!option) return false;
+    return this.withLock(roomId, async () => {
+      const room = this.rooms.get(roomId);
+      const turn = room?.match?.turn;
+      if (!room || !turn || turn.phase !== 'WORD_PICK') return false;
+      if (turn.drawerId !== playerId) return false;
+      if (turn.wordId) return false;
+      const option = turn.wordOptions.find(w => w.id === wordId);
+      if (!option) return false;
 
-    const word = await this.wordService.getWordById(wordId);
-    if (!word) return false;
+      const word = await this.wordService.getWordById(wordId);
+      if (!word) return false;
 
-    if (turn.timer) clearTimeout(turn.timer);
-    turn.timer = null;
+      if (turn.timer) clearTimeout(turn.timer);
+      turn.timer = null;
 
-    turn.wordId = wordId;
-    turn.word = word.canonical;
-    turn.synonyms = (word.synonyms as string[]) ?? [];
-    await this.wordService.incrementUsage(wordId);
+      turn.wordId = wordId;
+      turn.word = word.canonical;
+      turn.synonyms = (word.synonyms as string[]) ?? [];
+      await this.wordService.incrementUsage(wordId);
 
-    await this.startDrawingPhase(roomId);
-    return true;
+      await this.startDrawingPhase(roomId);
+      return true;
+    });
   }
 
   private async startDrawingPhase(roomId: string) {
@@ -426,7 +441,7 @@ export class GameStateService {
         phase: 'DRAWING',
         turnId: turn.id,
         drawerId: turn.drawerId,
-endsAt: turn.endsAt,
+        endsAt: turn.endsAt,
         ...(hintsEnabled ? { hint: generateHint(turn.word!, 'first') } : {}),
       },
     });
@@ -442,19 +457,13 @@ endsAt: turn.endsAt,
       const firstTimer = setTimeout(() => {
         if (turn.phase === 'DRAWING') {
           turn.hintPhase = 'first';
-          this.emit(roomId, {
-            type: 'turn:hint',
-            payload: { hint: generateHint(turn.word!, 'first') },
-          });
+          this.emit(roomId, { type: 'turn:hint', payload: { hint: generateHint(turn.word!, 'first') } });
         }
       }, firstHintAt);
       const secondTimer = setTimeout(() => {
         if (turn.phase === 'DRAWING') {
           turn.hintPhase = 'second';
-          this.emit(roomId, {
-            type: 'turn:hint',
-            payload: { hint: generateHint(turn.word!, 'second') },
-          });
+          this.emit(roomId, { type: 'turn:hint', payload: { hint: generateHint(turn.word!, 'second') } });
         }
       }, secondHintAt);
       turn.hintTimers.push(firstTimer, secondTimer);
@@ -468,13 +477,13 @@ endsAt: turn.endsAt,
   canDraw(roomId: string, playerId: string, turnId: string): boolean {
     const room = this.rooms.get(roomId);
     const turn = room?.match?.turn;
-    return (
-      !!room &&
-      !!turn &&
-      turn.phase === 'DRAWING' &&
-      turn.drawerId === playerId &&
-      turn.id === turnId
-    );
+    return !!room && !!turn && turn.phase === 'DRAWING' && turn.drawerId === playerId && turn.id === turnId;
+  }
+
+  getDrawerWord(roomId: string, playerId: string): string | null {
+    const turn = this.rooms.get(roomId)?.match?.turn;
+    if (!turn || turn.phase !== 'DRAWING' || turn.drawerId !== playerId) return null;
+    return turn.word;
   }
 
   submitStroke(roomId: string, playerId: string, chunk: StrokeChunk): boolean {
@@ -490,9 +499,7 @@ endsAt: turn.endsAt,
     const existing = turn.strokes.find(s => s.strokeId === chunk.strokeId);
     if (existing) {
       if (chunk.seq <= existing.seq) return false;
-      if (existing.points.length + chunk.points.length > GAME_CONSTANTS.MAX_POINTS_PER_STROKE) {
-        return false;
-      }
+      if (existing.points.length + chunk.points.length > GAME_CONSTANTS.MAX_POINTS_PER_STROKE) return false;
       existing.points.push(...chunk.points);
       existing.seq = chunk.seq;
     } else {
@@ -560,10 +567,7 @@ endsAt: turn.endsAt,
         data: { settings: next as unknown as Prisma.InputJsonValue },
       });
     } catch (err) {
-      this.logger.error(
-        `Failed to persist settings for room ${roomId}`,
-        err instanceof Error ? err.message : String(err),
-      );
+      this.logger.error(`Failed to persist settings for room ${roomId}`, err instanceof Error ? err.message : String(err));
     }
 
     this.emit(roomId, { type: 'room:snapshot', payload: this.getSnapshot(roomId) });
@@ -610,21 +614,13 @@ endsAt: turn.endsAt,
 
       const remaining = Math.max(0, Math.floor((turn.endsAt - now) / 1000));
       const isFirst = turn.correctGuessers.size === 1;
-      const score = calculateGuesserScore(
-        turn.timeLimit,
-        remaining,
-        isFirst,
-        player.usedHint,
-      );
+      const score = calculateGuesserScore(turn.timeLimit, remaining, isFirst, player.usedHint);
       player.score += score;
 
-      this.emit(roomId, {
-        type: 'guess:correct',
-        payload: { playerId, score },
-      });
+      this.emit(roomId, { type: 'guess:correct', payload: { playerId, score } });
       this.emitScores(roomId);
 
-const eligibleGuessers = Array.from(room.players.values()).filter(
+      const eligibleGuessers = Array.from(room.players.values()).filter(
         p => p.id !== turn.drawerId && p.isOnline && !this.isTeammate(room, turn.drawerId, p.id),
       );
       if (turn.correctGuessers.size >= eligibleGuessers.length) {
@@ -635,11 +631,7 @@ const eligibleGuessers = Array.from(room.players.values()).filter(
       return { accepted: true, correct: true, score };
     }
 
-    this.emit(roomId, {
-      type: 'guess:accepted',
-      payload: { playerId },
-      targetId: playerId,
-    });
+    this.emit(roomId, { type: 'guess:accepted', payload: { playerId }, targetId: playerId });
     this.emit(roomId, {
       type: 'chat:message',
       payload: {
@@ -682,12 +674,8 @@ const eligibleGuessers = Array.from(room.players.values()).filter(
     const room = this.rooms.get(roomId);
     const turn = room?.match?.turn;
     if (!room || !turn) return;
-    if (turn.ended) {
-      return;
-    }
-    if (turn.phase === 'REVEAL' || turn.phase === 'MATCH_RESULT') {
-      return;
-    }
+    if (turn.ended) return;
+    if (turn.phase === 'REVEAL' || turn.phase === 'MATCH_RESULT') return;
 
     turn.ended = true;
     if (turn.timer) clearTimeout(turn.timer);
@@ -748,117 +736,106 @@ const eligibleGuessers = Array.from(room.players.values()).filter(
       return;
     }
 
-    if (
-      completedTurns % room.match.drawerOrder.length === 0 &&
-      completedTurns > 0
-    ) {
+    if (completedTurns % room.match.drawerOrder.length === 0 && completedTurns > 0) {
       room.match.currentRound++;
     }
 
-    this.emit(roomId, {
-      type: 'match:phaseChanged',
-      payload: { phase: 'NEXT_TURN' },
-    });
+    this.emit(roomId, { type: 'match:phaseChanged', payload: { phase: 'NEXT_TURN' } });
 
     setTimeout(() => {
       void this.startWordPickPhase(roomId);
     }, 2000);
   }
 
-
-
   private async endMatch(roomId: string) {
-    const room = this.rooms.get(roomId);
-    if (!room || !room.match) return;
+    return this.withLock(roomId, async () => {
+      const room = this.rooms.get(roomId);
+      if (!room || !room.match) return;
 
-    const rankings = Array.from(room.players.values())
-      .map(p => ({
-        playerId: p.id,
-        nickname: p.nickname,
-        points: p.score,
-        rank: 0,
-      }))
-      .sort((a, b) => b.points - a.points)
-      .map((r, i) => ({ ...r, rank: i + 1 }));
+      const rankings = Array.from(room.players.values())
+        .map(p => ({ playerId: p.id, nickname: p.nickname, points: p.score, rank: 0 }))
+        .sort((a, b) => b.points - a.points)
+        .map((r, i) => ({ ...r, rank: i + 1 }));
 
-    const matchId = room.match.id;
-    const duration = Date.now() - (room.match.turn?.startedAt ?? Date.now());
+      const matchId = room.match.id;
+      const duration = Date.now() - room.match.startedAt;
 
-    let teamsResult: TeamResults | undefined;
-    if (room.settings.mode === 'TEAM' && room.teams) {
-      const buildTeam = (ids: string[], name: 'A' | 'B'): TeamResult => ({
-        name,
-        members: ids.map(id => ({ id, nickname: room.players.get(id)?.nickname ?? '?' })),
-        points: ids.reduce((sum, id) => sum + (room.players.get(id)?.score ?? 0), 0),
-      });
-      const teamA = buildTeam(room.teams.teamA, 'A');
-      const teamB = buildTeam(room.teams.teamB, 'B');
-      teamsResult = {
-        teamA,
-        teamB,
-        winner:
-          teamA.points === teamB.points ? 'DRAW' : teamA.points > teamB.points ? 'A' : 'B',
-      };
-    }
+      let teamsResult: TeamResults | undefined;
+      if (room.settings.mode === 'TEAM' && room.teams) {
+        const buildTeam = (ids: string[], name: 'A' | 'B'): TeamResult => ({
+          name,
+          members: ids.map(id => ({ id, nickname: room.players.get(id)?.nickname ?? '?' })),
+          points: ids.reduce((sum, id) => sum + (room.players.get(id)?.score ?? 0), 0),
+        });
+        const teamA = buildTeam(room.teams.teamA, 'A');
+        const teamB = buildTeam(room.teams.teamB, 'B');
+        teamsResult = {
+          teamA,
+          teamB,
+          winner: teamA.points === teamB.points ? 'DRAW' : teamA.points > teamB.points ? 'A' : 'B',
+        };
+      }
 
-    this.emit(roomId, {
-      type: 'match:finished',
-      payload: { matchId, rankings, duration, ...(teamsResult ? { teams: teamsResult } : {}) },
-    });
+      const matchState = room.match;
+      room.match = null;
 
-    try {
-      const completed = room.match.completedTurns;
-      const turnsPerRound = Math.max(1, room.match.drawerOrder.length);
-      const roundCount = Math.max(1, Math.ceil(completed.length / turnsPerRound));
-      const dbMatch = await this.prisma.match.create({
-        data: {
-          id: matchId,
-          roomId,
-          status: 'FINISHED',
-          rules: room.settings as unknown as Prisma.InputJsonValue,
-          endedAt: new Date(),
-          scores: {
-            create: rankings.map(r => ({
-              playerId: r.playerId,
-              points: r.points,
-            })),
-          },
-          rounds: {
-            create: Array.from({ length: roundCount }, (_, r) => ({
-              cycleNo: r + 1,
-              endedAt: new Date(),
-              turns: {
-                create: completed
-                  .slice(r * turnsPerRound, (r + 1) * turnsPerRound)
-                  .map(t => ({
-                    id: t.id,
-                    drawerId: t.drawerId,
-                    wordId: t.wordId,
-                    status: 'FINISHED' as const,
-                    startsAt: new Date(t.startedAt),
-                    endsAt: new Date(t.endsAt),
-                    result: { correctGuessers: t.correctCount } as Prisma.InputJsonValue,
-                    replay: {
-                      create: {
-                        strokes: t.strokes as unknown as Prisma.InputJsonValue,
-                        durationMs: Math.max(0, t.endsAt - t.startedAt),
+      let persistOk = false;
+      try {
+        const completed = matchState.completedTurns;
+        const turnsPerRound = Math.max(1, matchState.drawerOrder.length);
+        const roundCount = Math.max(1, Math.ceil(completed.length / turnsPerRound));
+        await this.prisma.match.create({
+          data: {
+            id: matchId,
+            roomId,
+            status: 'FINISHED',
+            rules: room.settings as unknown as Prisma.InputJsonValue,
+            endedAt: new Date(),
+            scores: {
+              create: rankings.map(r => ({ playerId: r.playerId, points: r.points })),
+            },
+            rounds: {
+              create: Array.from({ length: roundCount }, (_, r) => ({
+                cycleNo: r + 1,
+                endedAt: new Date(),
+                turns: {
+                  create: completed
+                    .slice(r * turnsPerRound, (r + 1) * turnsPerRound)
+                    .map(t => ({
+                      id: t.id,
+                      drawerId: t.drawerId,
+                      wordId: t.wordId,
+                      status: 'FINISHED' as const,
+                      startsAt: new Date(t.startedAt),
+                      endsAt: new Date(t.endsAt),
+                      result: { correctGuessers: t.correctCount } as Prisma.InputJsonValue,
+                      replay: {
+                        create: {
+                          strokes: t.strokes as unknown as Prisma.InputJsonValue,
+                          durationMs: Math.max(0, t.endsAt - t.startedAt),
+                        },
                       },
-                    },
-                  })),
-              },
-            })),
+                    })),
+                },
+              })),
+            },
           },
-        },
-      });
-      this.logger.log(`Match ${dbMatch.id} persisted: ${rankings.length} scores, ${completed.length} replays`);
-    } catch (err) {
-      this.logger.error(`Failed to persist match ${matchId}`, err instanceof Error ? err.message : String(err));
-    }
+        });
+        persistOk = true;
+        this.logger.log(`Match ${matchId} persisted: ${rankings.length} scores, ${completed.length} replays`);
+      } catch (err) {
+        this.logger.error(`Failed to persist match ${matchId}`, err instanceof Error ? err.message : String(err));
+      }
 
-    room.match = null;
-    void this.prisma.room
-      .update({ where: { id: roomId }, data: { status: 'WAITING' } })
-      .catch(() => undefined);
+      this.emit(roomId, {
+        type: 'match:finished',
+        payload: { matchId, rankings, duration, persisted: persistOk, ...(teamsResult ? { teams: teamsResult } : {}) },
+      });
+
+      void this.prisma.room
+        .update({ where: { id: roomId }, data: { status: 'WAITING' } })
+        .catch(() => undefined);
+    });
   }
 
   getTurnSnapshot(roomId: string): TurnSnapshot | null {
@@ -883,11 +860,7 @@ const eligibleGuessers = Array.from(room.players.values()).filter(
     const target = room.players.get(targetId);
     if (!target) return false;
     target.isKicked = true;
-    this.emit(roomId, {
-      type: 'room:playerKicked',
-      payload: { playerId: targetId },
-      targetId,
-    });
+    this.emit(roomId, { type: 'room:playerKicked', payload: { playerId: targetId }, targetId });
     this.removePlayer(roomId, targetId);
     return true;
   }
@@ -898,10 +871,7 @@ const eligibleGuessers = Array.from(room.players.values()).filter(
     const target = room.players.get(targetId);
     if (!target) return false;
     target.isMuted = muted;
-    this.emit(roomId, {
-      type: 'room:playerMuted',
-      payload: { playerId: targetId, muted },
-    });
+    this.emit(roomId, { type: 'room:playerMuted', payload: { playerId: targetId, muted } });
     return true;
   }
 

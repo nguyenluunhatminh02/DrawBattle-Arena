@@ -19,10 +19,16 @@ export class WordService {
       where.category = { slug: options.category };
     }
 
+    const total = await this.prisma.word.count({ where });
+    const take = Math.min(total, Math.max(count * 10, 50));
+    const skip = total > take ? Math.floor(Math.random() * (total - take)) : 0;
+
     const words = await this.prisma.word.findMany({
       where,
       include: { category: true },
-      take: Math.max(count * 5, 50),
+      take,
+      skip,
+      orderBy: { usageCount: 'asc' },
     });
 
     return pickWordOptions(words, count).map(w => ({
