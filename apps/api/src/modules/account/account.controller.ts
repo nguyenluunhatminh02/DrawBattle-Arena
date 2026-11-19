@@ -4,7 +4,6 @@ import { AccountService } from './account.service';
 import { AvatarService } from './avatar.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { Throttle } from '../../common/throttle.guard';
-import { JwtAuthGuard } from '../auth/auth.guard';
 
 @Controller('account')
 export class AccountController {
@@ -26,7 +25,7 @@ export class AccountController {
   }
 
   @Post('link-guest')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(AuthGuard)
   linkGuest(@Req() req: any, @Body() body: { guestSessionId: string; guestToken: string }) {
     return this.accountService.linkGuestToUser(body.guestSessionId, req.user.id, body.guestToken);
   }
