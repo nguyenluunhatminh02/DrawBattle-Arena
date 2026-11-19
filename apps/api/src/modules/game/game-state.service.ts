@@ -231,7 +231,7 @@ export class GameStateService {
   getSnapshot(roomId: string) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
-    const settings = room.settings as Record<string, unknown>;
+    const settings = room.settings as unknown as Record<string, unknown>;
     const hasPassword = Boolean(settings.passwordHash || settings.password);
     const { password: _p, passwordHash: _h, ...safeSettings } = settings;
     return {

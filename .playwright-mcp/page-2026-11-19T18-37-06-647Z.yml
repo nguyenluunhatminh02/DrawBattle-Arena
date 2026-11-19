@@ -1,0 +1,8 @@
+- generic [active] [ref=f1e1]:
+  - alert [ref=f1e42]
+  - main [ref=f1e43]:
+    - generic [ref=f1e45]:
+      - heading "Thách bạn bè" [level=2] [ref=f1e46]
+      - paragraph [ref=f1e47]: Bạn sẽ nhận một từ ngẫu nhiên và có 15 giây để vẽ. Sau đó gửi link cho bạn bè đoán!
+      - button "Bắt đầu vẽ" [ref=f1e48] [cursor=pointer]
+      - button "Quay lại" [ref=f1e49] [cursor=pointer]

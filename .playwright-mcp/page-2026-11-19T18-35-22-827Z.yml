@@ -1,0 +1,45 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e39]
+  - generic [ref=e43]:
+    - banner [ref=e44]:
+      - generic [ref=e45]:
+        - heading "DrawBattle" [level=1] [ref=e46]
+        - generic [ref=e47]: 6CBR2C
+        - generic [ref=e48]: ● online
+      - button "Copy Link" [ref=e50] [cursor=pointer]
+    - generic [ref=e51]:
+      - generic [ref=e55]:
+        - heading "Phòng chờ" [level=2] [ref=e56]
+        - generic [ref=e57]:
+          - paragraph [ref=e58]: Quét để mời bạn bè
+          - paragraph [ref=e60]: "Mã: 6CBR2C"
+        - generic [ref=e62]:
+          - generic [ref=e63]: TestPlayer (bạn)
+          - generic [ref=e64]: Host
+        - generic [ref=e66]:
+          - generic [ref=e67]:
+            - generic [ref=e68]: Số vòng
+            - combobox [ref=e69]:
+              - option "1"
+              - option "2" [selected]
+              - option "3"
+          - generic [ref=e70]:
+            - generic [ref=e71]: Thời gian vẽ
+            - combobox [ref=e72]:
+              - option "45s"
+              - option "60s" [selected]
+              - option "90s"
+          - generic [ref=e73]:
+            - generic [ref=e74]: Gợi ý (hints)
+            - button [ref=e75] [cursor=pointer]
+        - button "Bắt đầu (1/8)" [disabled]
+      - generic [ref=e77]:
+        - heading "Bảng điểm" [level=3] [ref=e79]
+        - generic [ref=e81]:
+          - generic [ref=e82]:
+            - generic [ref=e83]: "1."
+            - text: TestPlayer
+          - generic [ref=e84]: "0"
+        - generic [ref=e87]:
+          - textbox "Chat..." [ref=e88]
+          - button "Gửi" [disabled]
