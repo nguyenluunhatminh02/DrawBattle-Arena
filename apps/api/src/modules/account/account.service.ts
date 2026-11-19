@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { JwtService } from '../auth/jwt.service';
 import * as bcrypt from 'bcrypt';
@@ -44,7 +44,7 @@ export class AccountService {
     return { token, user: { id: user.id, email: user.email, nickname: user.nickname } };
   }
 
-  async linkGuestToUser(guestSessionId: string, userId: string) {
+  async linkGuestToUser(guestSessionId: string, userId: string, guestToken: string) {
     const guest = await this.prisma.guestSession.findUnique({ where: { id: guestSessionId } });
     if (!guest) {
       throw new BadRequestException('Guest session not found');
@@ -52,6 +52,16 @@ export class AccountService {
 
     if (guest.userId && guest.userId !== userId) {
       throw new BadRequestException('Guest session already linked to another account');
+    }
+
+    let tokenPayload: { sub: string };
+    try {
+      tokenPayload = this.jwtService.verify(guestToken);
+    } catch {
+      throw new UnauthorizedException('Invalid guest token');
+    }
+    if (tokenPayload.sub !== guestSessionId) {
+      throw new ForbiddenException('Token does not match guest session');
     }
 
     await this.prisma.guestSession.update({

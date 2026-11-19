@@ -1,7 +1,9 @@
-import { Controller, Get, Patch, Body, Param, Query } from '@nestjs/common';
+import { Controller, Get, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
 import { ModerationService } from './moderation.service';
+import { AdminGuard } from '../../common/admin.guard';
 
 @Controller('moderation')
+@UseGuards(AdminGuard)
 export class ModerationController {
   constructor(private readonly moderationService: ModerationService) {}
 

@@ -1,6 +1,7 @@
-import { Controller, Get, Post, Delete, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Body, Param, UseGuards } from '@nestjs/common';
 import { FeatureFlagService } from './feature-flag.service';
 import { Throttle } from '../../common/throttle.guard';
+import { AdminGuard } from '../../common/admin.guard';
 
 @Controller('flags')
 export class FeatureFlagController {
@@ -17,12 +18,14 @@ export class FeatureFlagController {
   }
 
   @Post()
+  @UseGuards(AdminGuard)
   @Throttle({ limit: 20, windowMs: 60_000, keyPrefix: 'flag-upsert' })
   upsert(@Body() body: { name: string; enabled: boolean; variant?: string }) {
     return this.flagService.upsert(body.name, body.enabled, body.variant);
   }
 
   @Delete(':name')
+  @UseGuards(AdminGuard)
   remove(@Param('name') name: string) {
     return this.flagService.remove(name);
   }
