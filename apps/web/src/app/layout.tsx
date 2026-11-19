@@ -14,8 +14,6 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export { metadata };
-
 export default function RootLayout({
   children,
 }: {

@@ -35,13 +35,6 @@ export class AccountService {
         nickname: trimmedNickname,
       },
     });
-    const user = await this.prisma.user.create({
-      data: {
-        email,
-        passwordHash,
-        nickname,
-      },
-    });
 
     const token = this.jwtService.sign({ sub: user.id, type: 'user', nickname: user.nickname });
     return { token, user: { id: user.id, email: user.email, nickname: user.nickname } };
