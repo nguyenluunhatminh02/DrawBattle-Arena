@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { ChallengeService } from './challenge.service';
 import { Throttle } from '../../common/throttle.guard';
+import { OptionalAuthGuard } from '../auth/optional-auth.guard';
 import type { WordDifficulty } from '@drawbattle/shared';
 
 @Controller('challenges')
@@ -36,11 +37,14 @@ export class ChallengeController {
   }
 
   @Post(':id/guesses')
+  @UseGuards(OptionalAuthGuard)
   @Throttle({ limit: 10, windowMs: 30_000, keyPrefix: 'challenge-guess' })
   submitGuess(
     @Param('id') id: string,
-    @Body() body: { answer: string; solverId?: string },
+    @Req() req: any,
+    @Body() body: { answer: string },
   ) {
-    return this.challenge.submitGuess(id, body.answer, body.solverId);
+    const solverId = req.user?.userId || req.user?.sessionId || undefined;
+    return this.challenge.submitGuess(id, body.answer, solverId);
   }
 }

@@ -109,7 +109,6 @@ export class GameSocketGateway
     const playerId = socket.data.playerId;
     const sessionId = socket.data.sessionId;
 
-    // Clean up rate limit entries for this socket
     for (const [key] of this.rateLimits) {
       if (key.endsWith(`:${playerId}`) || key.endsWith(`:${sessionId}`) || key.endsWith(`:${socket.id}`)) {
         this.rateLimits.delete(key);
@@ -117,8 +116,13 @@ export class GameSocketGateway
     }
 
     if (roomId && playerId) {
-      this.game.setPlayerOnline(roomId, playerId, false);
       const roomMap = this.roomSockets.get(roomId);
+      const currentSocket = roomMap?.get(playerId);
+      if (currentSocket && currentSocket.id !== socket.id) {
+        return;
+      }
+
+      this.game.setPlayerOnline(roomId, playerId, false);
       if (roomMap) {
         roomMap.delete(playerId);
         if (roomMap.size === 0) {
@@ -127,6 +131,11 @@ export class GameSocketGateway
       }
       this.broadcastRoomUpdate(roomId);
       const timer = setTimeout(() => {
+        const latestMap = this.roomSockets.get(roomId);
+        const latestSocket = latestMap?.get(playerId);
+        if (latestSocket) {
+          return;
+        }
         this.game.removePlayer(roomId, playerId);
         this.server.to(roomId).emit('room:playerLeft', playerId);
         this.disconnectTimers.delete(playerId);
