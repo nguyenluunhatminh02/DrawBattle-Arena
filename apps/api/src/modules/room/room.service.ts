@@ -111,9 +111,9 @@ export class RoomService {
       },
     });
     if (!room) throw new NotFoundException('Room not found');
-    const settings = room.settings as unknown as RoomSettings;
-    const hasPassword = Boolean(settings.password);
-    const { password: _unused, ...safeSettings } = settings;
+    const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
+    const hasPassword = Boolean(settings.passwordHash);
+    const { password: _p, passwordHash: _h, ...safeSettings } = settings;
     return {
       code: room.code,
       status: room.status,

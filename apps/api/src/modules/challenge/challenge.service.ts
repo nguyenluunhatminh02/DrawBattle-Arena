@@ -91,11 +91,18 @@ export class ChallengeService {
       if (challenge.status !== 'ACTIVE') throw new BadRequestException('Challenge not active');
       if (challenge.replayId) throw new BadRequestException('Challenge already finalized');
 
-      if (challenge.creatorSessionId && actor?.sessionId && challenge.creatorSessionId !== actor.sessionId) {
-        throw new ForbiddenException('Only the creator can finalize');
+      if (!actor?.userId && !actor?.sessionId) {
+        throw new ForbiddenException('Authentication required to finalize');
       }
-      if (challenge.creatorId && actor?.userId && challenge.creatorId !== actor.userId) {
-        throw new ForbiddenException('Only the creator can finalize');
+      if (challenge.creatorSessionId) {
+        if (!actor.sessionId || challenge.creatorSessionId !== actor.sessionId) {
+          throw new ForbiddenException('Only the creator can finalize');
+        }
+      }
+      if (challenge.creatorId) {
+        if (!actor.userId || challenge.creatorId !== actor.userId) {
+          throw new ForbiddenException('Only the creator can finalize');
+        }
       }
 
       const replay = await tx.replay.create({

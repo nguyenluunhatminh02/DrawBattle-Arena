@@ -1,5 +1,2 @@
--- AlterTable: add creatorSessionId to challenges
-ALTER TABLE "challenges" ADD COLUMN "creator_session_id" TEXT;
-
--- AlterTable: add solverSessionId to challenge_attempts
-ALTER TABLE "challenge_attempts" ADD COLUMN "solver_session_id" TEXT;
+-- This migration is now a no-op.
+-- The creator_session_id and solver_session_id columns are created in 0_init baseline migration.
