@@ -1,0 +1,215 @@
+{
+  "worktrees": {},
+  "sessions": {
+    "ses_e0c44483bffeTo7VsbfvzCpRmU": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:28.206Z"
+    },
+    "ses_e0c4447cbffeRpWd0ZU7f45lR5": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:28.326Z"
+    },
+    "ses_e0c444758ffeZdljih3W7ntmR0": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:28.440Z"
+    },
+    "ses_e0c4442bdffenpyVBoZ2pGWkSk": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:29.618Z"
+    },
+    "ses_e0c444204ffecTh0CoXpdqhaip": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:31.314Z"
+    },
+    "ses_e0c443b6dffeI2xz9FNVL7McXU": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:31.555Z"
+    },
+    "ses_e0c443a6bffeSJx2lP6Dh4QxCU": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:31.793Z"
+    },
+    "ses_e0c4439f3ffeLTaAEMJt8vW9i0": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:31.863Z"
+    },
+    "ses_e0c443679ffe2feLIyL8kHJLJ2": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.031Z"
+    },
+    "ses_e0c4434d8ffeyM1n6hG0cnxDiu": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.180Z"
+    },
+    "ses_e0c443448ffeX5tMD3qWhGBDy4": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.325Z"
+    },
+    "ses_e0c4433dcffeRBZNCTjhzE31Dt": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.423Z"
+    },
+    "ses_e0c44338cffe4AfDDM4mIbmLfO": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.503Z"
+    },
+    "ses_e0c443339ffeOZYRGuNOKj3u76": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.585Z"
+    },
+    "ses_e0c4432d6ffeyz3me7T8Cxssfv": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.682Z"
+    },
+    "ses_e0c44328dffeeF3gBY41ATc5XX": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.752Z"
+    },
+    "ses_e0c443242ffewa0n9eqLiCJm8a": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.825Z"
+    },
+    "ses_e0c4431e7ffejlzkoe0rudx8ds": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.926Z"
+    },
+    "ses_e0c443198ffeEv35j2cDr44VoL": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:33.998Z"
+    },
+    "ses_e0c443136ffeRnm3e006x4T6zu": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:15:34.124Z"
+    },
+    "ses_e0c43a46fffe669kJtfNGz8QVw": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:10.138Z"
+    },
+    "ses_e0c43a3d1ffegDTbrHHlcXcnmY": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:10.308Z"
+    },
+    "ses_e0c43a305ffeKQRa3hbhkgbwlu": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:10.499Z"
+    },
+    "ses_e0c43a269ffeG345P3BxNJaNMd": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:10.660Z"
+    },
+    "ses_e0c43a1dcffesmbdZSS0ImxUGd": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:10.796Z"
+    },
+    "ses_e0c43a0d4ffemeJ4NkgxYwP8dO": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:11.076Z"
+    },
+    "ses_e0c43a04fffeCSDKwjs4PxJqYb": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:11.196Z"
+    },
+    "ses_e0c439fceffejuTTDtITU1jpnU": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:11.323Z"
+    },
+    "ses_e0c439e52ffe5A42exJXk5EgYM": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:11.726Z"
+    },
+    "ses_e0c439d73ffe2YuxMmKzoo6kBW": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:11.973Z"
+    },
+    "ses_e0c439c75ffeesuSZxymiTPqFI": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:12.187Z"
+    },
+    "ses_e0c439bceffeQh63VyzJTVsvMc": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:12.367Z"
+    },
+    "ses_e0c439b3bffeSHFY3J0mAiNH67": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:12.518Z"
+    },
+    "ses_e0c439a7fffetRKZ2NvvkxrpHQ": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:12.684Z"
+    },
+    "ses_e0c4399f9ffeopK5tz6zCCmi9Z": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:12.837Z"
+    },
+    "ses_e0c439959ffedEu08ZOlZvyIaU": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:12.974Z"
+    },
+    "ses_e0c4398caffegTuW0gIPnPbH5m": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:13.121Z"
+    },
+    "ses_e0c439787ffeZBmFIyTHoQEQpw": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:13.448Z"
+    },
+    "ses_e0c439684ffeaLxl78IFI5bI9y": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:13.703Z"
+    },
+    "ses_e0c439618ffedhPsEfgMmciGjg": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:16:13.806Z"
+    },
+    "ses_e0c40c8b7ffe9ZWD6I1REihJ4k": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:17.455Z"
+    },
+    "ses_e0c40c7f0ffejtaxR3AoKT1B3D": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:17.665Z"
+    },
+    "ses_e0c40c704ffeOSHwO9PaqTbX5p": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:17.893Z"
+    },
+    "ses_e0c40c642ffeRkhiHW8ToVp4vq": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.095Z"
+    },
+    "ses_e0c40c5b6ffeCxAdZVADEUk75z": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.225Z"
+    },
+    "ses_e0c40c52dffe71v9ItPTaP1Knf": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.376Z"
+    },
+    "ses_e0c40c491ffeBisQPGOFoVL7xy": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.522Z"
+    },
+    "ses_e0c40c405ffeDb9odG2ASjr1E2": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.668Z"
+    },
+    "ses_e0c40c36effeRCVkI6nt3SXfJ0": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.813Z"
+    },
+    "ses_e0c40c2f1ffeYaJmFO1A4PVNPQ": {
+      "worktreeId": null,
+      "createdAt": "2026-11-19T12:19:18.933Z"
+    }
+  },
+  "tabOrder": {
+    "local": [
+      "pending:203fd241-d1b5-4627-a8e3-615b8cc256c2"
+    ]
+  },
+  "sessionsCollapsed": true,
+  "activeTarget": {
+    "projectId": "prj-f2ec703074de",
+    "kind": "local"
+  }
+}

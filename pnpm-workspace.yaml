@@ -1,0 +1,25 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+onlyBuiltDependencies:
+  - '@prisma/client'
+  - '@prisma/engines'
+  - prisma
+  - bcrypt
+  - esbuild
+  - '@nestjs/core'
+  - canvas
+  - protobufjs
+  - sharp
+  - msgpackr-extract
+  - '@swc/core'
+  - node-pty
+allowBuilds:
+  '@nestjs/core': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  bcrypt: true
+  canvas: true
+  esbuild: true
+  prisma: true

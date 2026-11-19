@@ -1,0 +1,59 @@
+import {
+  CanActivate,
+  ExecutionContext,
+  HttpException,
+  HttpStatus,
+  Injectable,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+
+export interface ThrottleConfig {
+  limit: number;
+  windowMs: number;
+  keyPrefix?: string;
+}
+
+export const THROTTLE_KEY = 'throttle_config';
+
+export function Throttle(config: ThrottleConfig) {
+  return (target: object, key?: string | symbol, descriptor?: PropertyDescriptor) => {
+    if (descriptor) {
+      Reflect.defineMetadata(THROTTLE_KEY, config, descriptor.value);
+    } else {
+      Reflect.defineMetadata(THROTTLE_KEY, config, target);
+    }
+    return descriptor ?? target;
+  };
+}
+
+@Injectable()
+export class ThrottleGuard implements CanActivate {
+  private readonly buckets = new Map<string, { count: number; resetAt: number }>();
+
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const config =
+      this.reflector.get<ThrottleConfig>(THROTTLE_KEY, context.getHandler()) ??
+      this.reflector.get<ThrottleConfig>(THROTTLE_KEY, context.getClass());
+    if (!config) return true;
+
+    const request = context.switchToHttp().getRequest();
+    const ip = request.ip ?? request.socket?.remoteAddress ?? 'unknown';
+    const key = `${config.keyPrefix ?? 'global'}:${ip}`;
+    const now = Date.now();
+
+    let bucket = this.buckets.get(key);
+    if (!bucket || now >= bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + config.windowMs };
+      this.buckets.set(key, bucket);
+    }
+
+    const mult = Math.max(1, parseInt(process.env.THROTTLE_MULT ?? '1', 10) || 1);
+    bucket.count++;
+    if (bucket.count > config.limit * mult) {
+      throw new HttpException('Rate limit exceeded', HttpStatus.TOO_MANY_REQUESTS);
+    }
+    return true;
+  }
+}

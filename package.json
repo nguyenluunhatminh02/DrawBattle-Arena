@@ -1,0 +1,31 @@
+{
+  "name": "drawbattle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DrawBattle - Real-time drawing and guessing game",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:web": "pnpm --filter @drawbattle/web dev",
+    "dev:api": "pnpm --filter @drawbattle/api dev",
+    "build": "pnpm -r build",
+    "build:shared": "pnpm --filter @drawbattle/shared build",
+    "build:api": "pnpm --filter @drawbattle/api build",
+    "build:web": "pnpm --filter @drawbattle/web build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:migrate": "pnpm --filter @drawbattle/api db:migrate",
+    "db:seed": "pnpm --filter @drawbattle/api db:seed",
+    "db:studio": "pnpm --filter @drawbattle/api db:studio",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
+  },
+  "keywords": ["game", "multiplayer", "drawing", "realtime"],
+  "author": "Minh",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

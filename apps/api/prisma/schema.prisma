@@ -1,0 +1,382 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  nickname     String
+  email        String?   @unique
+  passwordHash String?   @map("password_hash")
+  avatar       String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  guestSessions  GuestSession[]
+  roomPlayers    RoomPlayer[]
+  challenges     Challenge[]        @relation("ChallengeCreator")
+  attempts       ChallengeAttempt[] @relation("AttemptSolver")
+  streaks        Streak[]
+  dailyChallenges DailyChallenge[]  @relation("DailyChallengeCreator")
+  dailyAttempts  DailyChallengeAttempt[]
+
+  @@map("users")
+}
+
+model GuestSession {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique @map("token_hash")
+  userId     String?  @map("user_id")
+  expiresAt  DateTime @map("expires_at")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+
+  user                 User?                       @relation(fields: [userId], references: [id])
+  roomPlayers          RoomPlayer[]
+  dailyChallengeAttempts DailyChallengeAttempt[]
+
+  @@map("guest_sessions")
+}
+
+model Room {
+  id           String         @id @default(cuid())
+  code         String         @unique
+  hostPlayerId String?        @map("host_player_id")
+  visibility   RoomVisibility @default(PRIVATE)
+  settings     Json
+  status       RoomStatus     @default(WAITING)
+  expiresAt    DateTime?      @map("expires_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  players RoomPlayer[]
+  matches Match[]
+
+  @@map("rooms")
+}
+
+model RoomPlayer {
+  id               String     @id @default(cuid())
+  roomId           String     @map("room_id")
+  userId           String?    @map("user_id")
+  guestSessionId   String?    @map("guest_session_id")
+  nicknameSnapshot String     @map("nickname_snapshot")
+  role             PlayerRole @default(PLAYER)
+  joinedAt         DateTime   @default(now()) @map("joined_at")
+
+  room    Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user    User?         @relation(fields: [userId], references: [id])
+  guest   GuestSession? @relation(fields: [guestSessionId], references: [id])
+  guesses Guess[]
+  scores  Score[]
+
+  @@unique([roomId, userId])
+  @@unique([roomId, guestSessionId])
+  @@map("room_players")
+}
+
+model Match {
+  id        String      @id @default(cuid())
+  roomId    String      @map("room_id")
+  status    MatchStatus @default(IN_PROGRESS)
+  rules     Json
+  startedAt DateTime    @default(now()) @map("started_at")
+  endedAt   DateTime?   @map("ended_at")
+
+  room   Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  rounds Round[]
+  scores Score[]
+
+  @@map("matches")
+}
+
+model Round {
+  id        String    @id @default(cuid())
+  matchId   String    @map("match_id")
+  cycleNo   Int       @map("cycle_no")
+  startedAt DateTime  @default(now()) @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  match Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  turns Turn[]
+
+  @@map("rounds")
+}
+
+model Turn {
+  id       String     @id @default(cuid())
+  roundId  String     @map("round_id")
+  drawerId String     @map("drawer_id")
+  wordId   String     @map("word_id")
+  status   TurnStatus @default(WORD_PICK)
+  startsAt DateTime   @map("starts_at")
+  endsAt   DateTime   @map("ends_at")
+  result   Json?
+
+  round   Round   @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  word    Word    @relation(fields: [wordId], references: [id])
+  guesses Guess[]
+  replay  Replay?
+
+  @@map("turns")
+}
+
+model Guess {
+  id             String   @id @default(cuid())
+  turnId         String   @map("turn_id")
+  playerId       String   @map("player_id")
+  guessText      String   @map("guess_text")
+  normalizedText String   @map("normalized_text")
+  correct        Boolean  @default(false)
+  receivedAt     DateTime @default(now()) @map("received_at")
+
+  turn   Turn       @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  player RoomPlayer @relation(fields: [playerId], references: [id])
+
+  @@index([turnId, receivedAt])
+  @@index([turnId, playerId])
+  @@map("guesses")
+}
+
+model Score {
+  id        String   @id @default(cuid())
+  matchId   String   @map("match_id")
+  playerId  String   @map("player_id")
+  points    Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  match  Match      @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player RoomPlayer @relation(fields: [playerId], references: [id])
+
+  @@unique([matchId, playerId])
+  @@map("scores")
+}
+
+model Word {
+  id         String         @id @default(cuid())
+  canonical  String         @unique
+  categoryId String         @map("category_id")
+  difficulty WordDifficulty
+  synonyms   Json           @default("[]")
+  active     Boolean        @default(true)
+  usageCount Int            @default(0) @map("usage_count")
+
+  category        Category          @relation(fields: [categoryId], references: [id])
+  turns           Turn[]
+  challenges      Challenge[]
+  dailyChallenges DailyChallenge[]
+
+  @@index([categoryId, difficulty, active])
+  @@map("words")
+}
+
+model Category {
+  id   String @id @default(cuid())
+  slug String @unique
+  name String
+
+  words Word[]
+
+  @@map("categories")
+}
+
+model Replay {
+  id          String   @id @default(cuid())
+  turnId      String?  @unique @map("turn_id")
+  challengeId String?  @unique @map("challenge_id")
+  dailyId     String?  @unique @map("daily_id")
+  strokes     Json
+  durationMs  Int      @map("duration_ms")
+  gifUrl      String?  @map("gif_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  turn            Turn?            @relation(fields: [turnId], references: [id])
+  challenge       Challenge?
+  dailyChallenge  DailyChallenge?  @relation(fields: [dailyId], references: [id])
+
+  @@map("replays")
+}
+
+model Challenge {
+  id         String          @id @default(cuid())
+  creatorId  String?         @map("creator_id")
+  wordId     String          @map("word_id")
+  status     ChallengeStatus @default(ACTIVE)
+  expiresAt  DateTime        @map("expires_at")
+  replayId   String?         @unique @map("replay_id")
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  creator  User?              @relation("ChallengeCreator", fields: [creatorId], references: [id])
+  word     Word               @relation(fields: [wordId], references: [id])
+  replay   Replay?            @relation(fields: [replayId], references: [id])
+  attempts ChallengeAttempt[]
+
+  @@index([status, expiresAt])
+  @@map("challenges")
+}
+
+model ChallengeAttempt {
+  id          String   @id @default(cuid())
+  challengeId String   @map("challenge_id")
+  solverId    String?  @map("solver_id")
+  attemptNo   Int      @map("attempt_no")
+  answer      String
+  normalized  String
+  correct     Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  challenge Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  solver    User?     @relation("AttemptSolver", fields: [solverId], references: [id])
+
+  @@index([challengeId, attemptNo])
+  @@map("challenge_attempts")
+}
+
+enum RoomVisibility {
+  PRIVATE
+  UNLISTED
+  PUBLIC
+}
+
+enum RoomStatus {
+  WAITING
+  PLAYING
+  FINISHED
+}
+
+enum PlayerRole {
+  HOST
+  PLAYER
+  SPECTATOR
+}
+
+enum MatchStatus {
+  IN_PROGRESS
+  FINISHED
+  CANCELLED
+}
+
+enum TurnStatus {
+  WORD_PICK
+  DRAWING
+  REVEAL
+  NEXT_TURN
+  FINISHED
+}
+
+enum WordDifficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum ChallengeStatus {
+  ACTIVE
+  EXPIRED
+  DELETED
+}
+
+model Report {
+  id         String   @id @default(cuid())
+  reporterId String?  @map("reporter_id")
+  targetType String   @map("target_type")
+  targetId   String   @map("target_id")
+  reason     String
+  status     String   @default("PENDING")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([status, createdAt])
+  @@map("reports")
+}
+
+model DailyChallenge {
+  id        String   @id @default(cuid())
+  date      DateTime @unique @db.Date
+  wordId    String   @map("word_id")
+  creatorId String?  @map("creator_id")
+  replayId  String?  @unique @map("replay_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  word      Word                      @relation(fields: [wordId], references: [id])
+  creator   User?                     @relation("DailyChallengeCreator", fields: [creatorId], references: [id])
+  replay    Replay?
+  attempts  DailyChallengeAttempt[]
+
+  @@index([date])
+  @@map("daily_challenges")
+}
+
+model DailyChallengeAttempt {
+  id               String   @id @default(cuid())
+  dailyChallengeId String   @map("daily_challenge_id")
+  userId           String?  @map("user_id")
+  guestSessionId   String?  @map("guest_session_id")
+  answer           String
+  normalized       String
+  correct          Boolean  @default(false)
+  timeToGuessMs    Int?     @map("time_to_guess_ms")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  dailyChallenge DailyChallenge @relation(fields: [dailyChallengeId], references: [id], onDelete: Cascade)
+  user           User?          @relation(fields: [userId], references: [id])
+  guest          GuestSession?  @relation(fields: [guestSessionId], references: [id])
+
+  @@index([dailyChallengeId, userId])
+  @@index([dailyChallengeId, guestSessionId])
+  @@map("daily_challenge_attempts")
+}
+
+model Streak {
+  id            String   @id @default(cuid())
+  userId        String   @unique @map("user_id")
+  currentStreak Int      @default(0) @map("current_streak")
+  longestStreak Int      @default(0) @map("longest_streak")
+  lastPlayedAt  DateTime @default(now()) @map("last_played_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("streaks")
+}
+
+model LeaderboardSnapshot {
+  id        String   @id @default(cuid())
+  period    String
+  rank      Int
+  userId    String   @map("user_id")
+  nickname  String
+  points    Int
+  wins      Int      @default(0)
+  generatedAt DateTime @default(now()) @map("generated_at")
+
+  @@index([period, rank])
+  @@index([period, userId])
+  @@map("leaderboard_snapshots")
+}
+
+model FeatureFlag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  enabled   Boolean  @default(false)
+  variant   String?  @map("variant")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("feature_flags")
+}
+
+model ModerationAction {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  targetType String   @map("target_type")
+  targetId   String   @map("target_id")
+  action     String
+  reason     String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("moderation_actions")
+}

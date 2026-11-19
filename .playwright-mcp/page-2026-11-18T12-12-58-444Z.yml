@@ -1,0 +1,14 @@
+- main [ref=f7e2]:
+  - generic [ref=f7e3]:
+    - generic [ref=f7e4]:
+      - heading "DrawBattle" [level=1] [ref=f7e5]
+      - paragraph [ref=f7e6]: Vẽ nhanh, đoán nhanh, cười cùng bạn bè
+    - generic [ref=f7e7]:
+      - heading "Nickname" [level=3] [ref=f7e9]
+      - textbox "Nhập tên của bạn..." [ref=f7e11]
+    - generic [ref=f7e12]:
+      - button "Tạo phòng mới" [disabled]
+      - generic [ref=f7e14]:
+        - textbox "Mã phòng" [ref=f7e15]
+        - button "Vào" [disabled]
+      - button "Thách bạn bè" [disabled]
