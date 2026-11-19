@@ -52,7 +52,6 @@ export class DailyService {
         word: {
           select: {
             id: true,
-            canonical: true,
             difficulty: true,
             category: { select: { name: true } },
           },
@@ -69,7 +68,6 @@ export class DailyService {
           word: {
             select: {
               id: true,
-              canonical: true,
               difficulty: true,
               category: { select: { name: true } },
             },

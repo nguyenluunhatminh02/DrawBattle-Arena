@@ -233,6 +233,8 @@ export class GameSocketGateway
       const turn = this.game.getTurnSnapshot(joined.roomId);
       if (turn) {
         socket.emit('turn:restore', turn);
+        const word = this.game.getDrawerWord(joined.roomId, joined.playerId);
+        if (word) socket.emit('turn:yourWord', { word });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Join failed';

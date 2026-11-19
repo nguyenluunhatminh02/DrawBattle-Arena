@@ -7,6 +7,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
+import { useGameStore } from '@/lib/store';
 import type { StrokeChunk } from '@drawbattle/shared';
 
 interface ReplayStroke {
@@ -20,6 +21,7 @@ export default function ChallengePlayPage() {
   const params = useParams();
   const router = useRouter();
   const id = params.id as string;
+  const player = useGameStore(s => s.player);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -36,7 +38,7 @@ export default function ChallengePlayPage() {
   const [guessing, setGuessing] = useState(false);
 
   useEffect(() => {
-    api.getChallengeInfo(id).then(info => {
+    api.getChallengeInfo(id, player?.token).then(info => {
       if (info.status === 'EXPIRED') {
         setExpired(true);
         return;
@@ -142,7 +144,7 @@ export default function ChallengePlayPage() {
     if (!answer.trim() || remaining <= 0) return;
     setGuessing(true);
     try {
-      const res = await api.submitChallengeGuess(id, answer.trim());
+      const res = await api.submitChallengeGuess(id, answer.trim(), player?.token);
       setAttemptNo(res.attemptNo);
       setRemaining(res.remainingAttempts);
       setResult({ correct: res.correct, answer: res.answer });

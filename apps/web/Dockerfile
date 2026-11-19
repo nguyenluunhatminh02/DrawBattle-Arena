@@ -13,7 +13,9 @@ COPY --from=deps /app ./
 COPY packages ./packages
 COPY apps/web ./apps/web
 ARG NEXT_PUBLIC_API_URL
+ARG INTERNAL_API_URL=http://api:3001
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV INTERNAL_API_URL=$INTERNAL_API_URL
 RUN pnpm --filter @drawbattle/shared build && pnpm --filter @drawbattle/web build
 
 FROM node:20-alpine AS runtime

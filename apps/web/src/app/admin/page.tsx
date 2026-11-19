@@ -34,7 +34,8 @@ interface FeatureFlag {
 
 export default function AdminPage() {
   const router = useRouter();
-  const player = useGameStore(s => s.player);
+  const token = useGameStore(s => s.token);
+  const user = useGameStore(s => s.user);
   const [reports, setReports] = useState<Report[]>([]);
   const [stats, setStats] = useState<ModerationStats | null>(null);
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
@@ -43,13 +44,13 @@ export default function AdminPage() {
   const [tab, setTab] = useState<'reports' | 'flags'>('reports');
 
   useEffect(() => {
-    if (!player?.token) {
-      setError('Please log in as an admin to access this page.');
+    if (!token || !user) {
+      setError('Please log in with an admin account to access this page.');
       setLoading(false);
       return;
     }
     const headers: HeadersInit = {
-      Authorization: `Bearer ${player.token}`,
+      Authorization: `Bearer ${token}`,
     };
     Promise.all([
       fetch('/api/moderation/reports', { headers }).then(r => {
@@ -72,19 +73,19 @@ export default function AdminPage() {
         setLoading(false);
       })
       .catch(err => {
-        setError(`Access denied: ${err.message}. You may not have admin privileges.`);
+        setError(`Access denied: ${err.message}. Admin privileges required.`);
         setLoading(false);
       });
-  }, [player?.token]);
+  }, [token, user]);
 
   async function updateReport(id: string, status: string, action?: string) {
-    if (!player?.token) return;
+    if (!token) return;
     try {
       const res = await fetch(`/api/moderation/reports/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${player.token}`,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ status, action }),
       });
@@ -108,13 +109,13 @@ export default function AdminPage() {
   }
 
   async function toggleFlag(name: string, enabled: boolean) {
-    if (!player?.token) return;
+    if (!token) return;
     try {
       const res = await fetch('/api/flags', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${player.token}`,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ name, enabled: !enabled }),
       });

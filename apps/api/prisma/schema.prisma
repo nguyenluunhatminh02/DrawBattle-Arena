@@ -206,13 +206,14 @@ model Replay {
 }
 
 model Challenge {
-  id         String          @id @default(cuid())
-  creatorId  String?         @map("creator_id")
-  wordId     String          @map("word_id")
-  status     ChallengeStatus @default(ACTIVE)
-  expiresAt  DateTime        @map("expires_at")
-  replayId   String?         @unique @map("replay_id")
-  createdAt  DateTime        @default(now()) @map("created_at")
+  id               String          @id @default(cuid())
+  creatorId        String?         @map("creator_id")
+  creatorSessionId String?         @map("creator_session_id")
+  wordId           String          @map("word_id")
+  status           ChallengeStatus @default(ACTIVE)
+  expiresAt        DateTime        @map("expires_at")
+  replayId         String?         @unique @map("replay_id")
+  createdAt        DateTime        @default(now()) @map("created_at")
 
   creator  User?              @relation("ChallengeCreator", fields: [creatorId], references: [id])
   word     Word               @relation(fields: [wordId], references: [id])
@@ -224,14 +225,15 @@ model Challenge {
 }
 
 model ChallengeAttempt {
-  id          String   @id @default(cuid())
-  challengeId String   @map("challenge_id")
-  solverId    String?  @map("solver_id")
-  attemptNo   Int      @map("attempt_no")
-  answer      String
-  normalized  String
-  correct     Boolean  @default(false)
-  createdAt   DateTime @default(now()) @map("created_at")
+  id              String   @id @default(cuid())
+  challengeId     String   @map("challenge_id")
+  solverId        String?  @map("solver_id")
+  solverSessionId String?  @map("solver_session_id")
+  attemptNo       Int      @map("attempt_no")
+  answer          String
+  normalized      String
+  correct         Boolean  @default(false)
+  createdAt       DateTime @default(now()) @map("created_at")
 
   challenge Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
   solver    User?     @relation("AttemptSolver", fields: [solverId], references: [id])

@@ -261,45 +261,51 @@ export class GameStateService {
 
       room.match = { id: '__starting__', rounds: 0, totalTurns: 0, currentRound: 0, drawerOrder: [], currentDrawerIndex: 0, turn: null, completedTurns: [], startedAt: Date.now() } as MatchState;
 
-      void this.prisma.room
-        .update({ where: { id: roomId }, data: { status: 'PLAYING' } })
-        .catch(() => undefined);
+      try {
+        void this.prisma.room
+          .update({ where: { id: roomId }, data: { status: 'PLAYING' } })
+          .catch(() => undefined);
 
-      let turnDuration =
-        room.settings.mode === 'SPEED' || room.settings.mode === 'DUEL'
-          ? modeConfig.turnDuration
-          : room.settings.turnDuration;
-      let enableHints = room.settings.enableHints;
-      if ((room.settings.mode || 'CLASSIC') === 'CLASSIC') {
-        const durationFlag = await this.featureFlags.find('classic_turn_duration');
-        if (durationFlag?.enabled && durationFlag.variant) {
-          const variant = parseInt(durationFlag.variant, 10);
-          if (Number.isFinite(variant) && variant >= 10 && variant <= 180) {
-            turnDuration = variant;
+        let turnDuration =
+          room.settings.mode === 'SPEED' || room.settings.mode === 'DUEL'
+            ? modeConfig.turnDuration
+            : room.settings.turnDuration;
+        let enableHints = room.settings.enableHints;
+        if ((room.settings.mode || 'CLASSIC') === 'CLASSIC') {
+          const durationFlag = await this.featureFlags.find('classic_turn_duration');
+          if (durationFlag?.enabled && durationFlag.variant) {
+            const variant = parseInt(durationFlag.variant, 10);
+            if (Number.isFinite(variant) && variant >= 10 && variant <= 180) {
+              turnDuration = variant;
+            }
           }
+          const hintsFlag = await this.featureFlags.find('classic_hints');
+          if (hintsFlag) enableHints = hintsFlag.enabled;
         }
-        const hintsFlag = await this.featureFlags.find('classic_hints');
-        if (hintsFlag) enableHints = hintsFlag.enabled;
-      }
 
-      const drawerOrder = this.shuffle(eligible.slice(0, modeConfig.maxPlayers).map(p => p.id));
-      const matchId = uuid();
-      const rounds = room.settings.mode === 'DUEL' ? modeConfig.rounds : room.settings.rounds;
-      const totalTurns =
-        room.settings.mode === 'DUEL' ? modeConfig.rounds : rounds * drawerOrder.length;
-      room.match = {
-        id: matchId,
-        rounds,
-        totalTurns,
-        currentRound: 1,
-        drawerOrder,
-        currentDrawerIndex: 0,
-        turn: null,
-        completedTurns: [],
-        turnDuration,
-        enableHints,
-        startedAt: Date.now(),
-      };
+        const drawerOrder = this.shuffle(eligible.slice(0, modeConfig.maxPlayers).map(p => p.id));
+        const matchId = uuid();
+        const rounds = room.settings.mode === 'DUEL' ? modeConfig.rounds : room.settings.rounds;
+        const totalTurns =
+          room.settings.mode === 'DUEL' ? modeConfig.rounds : rounds * drawerOrder.length;
+        room.match = {
+          id: matchId,
+          rounds,
+          totalTurns,
+          currentRound: 1,
+          drawerOrder,
+          currentDrawerIndex: 0,
+          turn: null,
+          completedTurns: [],
+          turnDuration,
+          enableHints,
+          startedAt: Date.now(),
+        };
+      } catch (err) {
+        room.match = null;
+        this.logger.error(`startMatch init failed for ${roomId}`, err instanceof Error ? err.message : String(err));
+        return false;
+      }
 
       for (const p of room.players.values()) {
         p.score = 0;
