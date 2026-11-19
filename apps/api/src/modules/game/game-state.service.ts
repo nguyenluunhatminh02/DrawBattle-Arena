@@ -311,6 +311,10 @@ export class GameStateService {
         p.score = 0;
       }
 
+      const matchId = room.match!.id;
+      const rounds = room.match!.rounds;
+      const drawerOrder = room.match!.drawerOrder;
+
       if (room.settings.mode === 'TEAM') {
         const shuffled = this.shuffle(drawerOrder);
         const mid = Math.ceil(shuffled.length / 2);
@@ -330,7 +334,7 @@ export class GameStateService {
 
       this.emit(roomId, {
         type: 'match:started',
-        payload: { matchId, round: 1, totalRounds: rounds, drawerOrder: drawerOrder.map(id => ({ id, nickname: room.players.get(id)?.nickname || '?' })) },
+        payload: { matchId, round: 1, totalRounds: rounds, drawerOrder: drawerOrder.map((id: string) => ({ id, nickname: room.players.get(id)?.nickname || '?' })) },
       });
 
       await this.startWordPickPhase(roomId);
