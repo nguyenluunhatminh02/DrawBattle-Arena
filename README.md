@@ -24,6 +24,28 @@ pnpm dev                               # API :3001 + Web :3002
 
 Open http://localhost:3002.
 
+## Status
+
+**Production-ready** with known architectural limitations (see Known Limitations below).
+
+### Recent Security & Correctness Fixes (Nov 2026)
+- ✅ NestJS DI: Fixed module imports for AdminGuard
+- ✅ Migration dedup: Baseline migration now complete, incremental migrations are no-ops
+- ✅ Room password hash: Stripped from API responses
+- ✅ Challenge finalize: Requires authentication, strict ownership check
+- ✅ Canvas rendering: Incremental drawing (performance improvement)
+- ✅ Room join: Serializable isolation level
+- ✅ Admin UI: Uses account JWT instead of guest token
+- ✅ Daily challenge: Word answer no longer leaked in API
+- ✅ Drawer reconnect: Private word event on rejoin
+- ✅ Replay worker: Concurrency limits (max 3 active jobs)
+
+### Known Limitations
+- **Multi-instance**: Redis adapter for broadcast only; game state still in-memory per process
+- **Crash recovery**: Match in progress lost on server restart
+- **Next.js 14.2.4**: 75 security advisories (5 critical) — upgrade recommended before production
+- **Leaderboard**: All-time capped at 2000 most recent matches
+
 ## Features (implemented)
 
 ### Phase 0+1 — Core game

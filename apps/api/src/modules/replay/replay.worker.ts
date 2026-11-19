@@ -11,17 +11,35 @@ export class ReplayWorker {
   private readonly logger = new Logger(ReplayWorker.name);
   private readonly renderDir = join(process.cwd(), 'public', 'replays');
   private isRendering = false;
+  private readonly activeJobs = new Map<string, Promise<void>>();
+  private readonly MAX_CONCURRENT = 3;
 
   constructor(private readonly prisma: PrismaService) {}
 
   async queueRender(replayId: string, strokes: any[], durationMs: number): Promise<string> {
-    this.logger.log(`Queued render for replay ${replayId}`);
-    void this.renderInWorker(replayId, strokes, durationMs).catch(err => {
-      this.logger.error(
-        `Queued render failed for ${replayId}`,
-        err instanceof Error ? err.message : String(err),
-      );
-    });
+    if (this.activeJobs.has(replayId)) {
+      this.logger.debug(`Render already queued for ${replayId}`);
+      return replayId;
+    }
+
+    if (this.activeJobs.size >= this.MAX_CONCURRENT) {
+      this.logger.warn(`Max concurrent renders (${this.MAX_CONCURRENT}) reached, skipping ${replayId}`);
+      return replayId;
+    }
+
+    const job = this.renderInWorker(replayId, strokes, durationMs)
+      .catch(err => {
+        this.logger.error(
+          `Queued render failed for ${replayId}`,
+          err instanceof Error ? err.message : String(err),
+        );
+      })
+      .finally(() => {
+        this.activeJobs.delete(replayId);
+      });
+
+    this.activeJobs.set(replayId, job);
+    this.logger.log(`Queued render for replay ${replayId} (${this.activeJobs.size}/${this.MAX_CONCURRENT} active)`);
     return replayId;
   }
 
@@ -42,6 +60,14 @@ export class ReplayWorker {
 
     try {
       for (const replay of pending) {
+        if (this.activeJobs.has(replay.id)) {
+          this.logger.debug(`Skipping ${replay.id} - already queued`);
+          continue;
+        }
+        if (this.activeJobs.size >= this.MAX_CONCURRENT) {
+          this.logger.warn(`Max concurrent reached, stopping batch`);
+          break;
+        }
         try {
           await this.renderInWorker(replay.id, replay.strokes as any[], replay.durationMs);
         } catch (err) {
@@ -74,7 +100,13 @@ export class ReplayWorker {
         },
       });
 
+      const timeout = setTimeout(() => {
+        worker.terminate();
+        reject(new Error(`Worker timeout for ${replayId}`));
+      }, 60_000);
+
       worker.on('message', async (result: Buffer | { error: string }) => {
+        clearTimeout(timeout);
         if (result && typeof result === 'object' && 'error' in result) {
           reject(new Error((result as { error: string }).error));
           return;
@@ -101,8 +133,12 @@ export class ReplayWorker {
         }
       });
 
-      worker.on('error', reject);
+      worker.on('error', err => {
+        clearTimeout(timeout);
+        reject(err);
+      });
       worker.on('exit', code => {
+        clearTimeout(timeout);
         if (code !== 0) {
           reject(new Error(`Worker exited with code ${code}`));
         }
