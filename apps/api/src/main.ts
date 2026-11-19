@@ -5,8 +5,9 @@ import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  if (!process.env.JWT_SECRET) {
-    console.error('ERROR: JWT_SECRET environment variable is not set. Application cannot start.');
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.length < 32 || secret === 'change-me-in-production' || secret === 'change-me-to-a-random-64-char-hex-string') {
+    console.error('ERROR: JWT_SECRET must be set to a random string of at least 32 characters. Application cannot start.');
     process.exit(1);
   }
 
@@ -23,7 +24,7 @@ async function bootstrap() {
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
-      forbidNonWhitelisted: true,
+      forbidNonWhitelisted: false,
       transform: true,
     }),
   );

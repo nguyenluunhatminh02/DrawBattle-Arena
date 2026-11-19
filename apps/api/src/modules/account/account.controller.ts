@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Delete, Body, UseGuards, Req, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Body, UseGuards, Req, UploadedFile, UseInterceptors, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { AccountService } from './account.service';
 import { AvatarService } from './avatar.service';
@@ -38,8 +38,18 @@ export class AccountController {
 
   @Post('avatar')
   @UseGuards(AuthGuard)
-  @UseInterceptors(FileInterceptor('avatar'))
+  @Throttle({ limit: 10, windowMs: 60_000, keyPrefix: 'avatar-upload' })
+  @UseInterceptors(FileInterceptor('avatar', {
+    limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+    fileFilter: (_req, file, cb) => {
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
+        return cb(new BadRequestException('Invalid file type'), false);
+      }
+      cb(null, true);
+    },
+  }))
   async uploadAvatar(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
     const avatarUrl = await this.avatarService.uploadAvatar(req.user.id, file);
     return { avatarUrl };
   }

@@ -1,15 +1,40 @@
 const BASE = '/api';
+const DEFAULT_TIMEOUT_MS = 15_000;
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(body.message || `HTTP ${res.status}`);
+  const merged = new Headers({ 'Content-Type': 'application/json' });
+  if (options?.headers) {
+    const h = options.headers;
+    if (h instanceof Headers) {
+      h.forEach((v, k) => merged.set(k, v));
+    } else if (Array.isArray(h)) {
+      h.forEach(([k, v]) => merged.set(k, v));
+    } else {
+      for (const [k, v] of Object.entries(h as Record<string, string>)) {
+        merged.set(k, String(v));
+      }
+    }
   }
-  return res.json();
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...options,
+      headers: merged,
+      signal: options?.signal ?? ctrl.signal,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ message: res.statusText }));
+      throw new Error(body.message || `HTTP ${res.status}`);
+    }
+    if (res.status === 204) return undefined as T;
+    const text = await res.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function authed(token: string): HeadersInit {
@@ -66,7 +91,7 @@ export const api = {
     });
   },
 
-  getChallengeInfo(id: string) {
+  getChallengeInfo(id: string, token?: string) {
     return request<{
       challengeId: string;
       status: string;
@@ -74,11 +99,12 @@ export const api = {
       hasReplay: boolean;
       replay: { strokes: unknown; durationMs: number } | null;
       attemptCount: number;
+      myAttempts: number;
       maxAttempts: number;
-    }>(`/challenges/${id}`);
+    }>(`/challenges/${id}`, { headers: token ? authed(token) : undefined });
   },
 
-  submitChallengeGuess(id: string, answer: string, solverId?: string) {
+  submitChallengeGuess(id: string, answer: string, token?: string) {
     return request<{
       correct: boolean;
       attemptNo: number;
@@ -86,7 +112,8 @@ export const api = {
       answer?: string;
     }>(`/challenges/${id}/guesses`, {
       method: 'POST',
-      body: JSON.stringify({ answer, solverId }),
+      headers: token ? authed(token) : undefined,
+      body: JSON.stringify({ answer }),
     });
   },
 

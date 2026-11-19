@@ -56,34 +56,36 @@ export class RoomService {
       throw new ConflictException('Could not generate unique room code');
     }
 
-    const room = await this.prisma.room.create({
-      data: {
-        code,
-        settings: finalSettings as unknown as Prisma.InputJsonValue,
-        expiresAt: new Date(Date.now() + GAME_CONSTANTS.ROOM_TTL_MS),
-      },
-    });
+    return this.prisma.$transaction(async (tx) => {
+      const room = await tx.room.create({
+        data: {
+          code,
+          settings: finalSettings as unknown as Prisma.InputJsonValue,
+          expiresAt: new Date(Date.now() + GAME_CONSTANTS.ROOM_TTL_MS),
+        },
+      });
 
-    const hostPlayer = await this.prisma.roomPlayer.create({
-      data: {
+      const hostPlayer = await tx.roomPlayer.create({
+        data: {
+          roomId: room.id,
+          userId: hostUserId,
+          guestSessionId: hostSessionId,
+          nicknameSnapshot: hostNickname,
+          role: 'HOST',
+        },
+      });
+
+      await tx.room.update({
+        where: { id: room.id },
+        data: { hostPlayerId: hostPlayer.id },
+      });
+
+      return {
         roomId: room.id,
-        userId: hostUserId,
-        guestSessionId: hostSessionId,
-        nicknameSnapshot: hostNickname,
-        role: 'HOST',
-      },
+        roomCode: code,
+        playerId: hostPlayer.id,
+      };
     });
-
-    await this.prisma.room.update({
-      where: { id: room.id },
-      data: { hostPlayerId: hostPlayer.id },
-    });
-
-    return {
-      roomId: room.id,
-      roomCode: code,
-      playerId: hostPlayer.id,
-    };
   }
 
   async getRoomInfo(code: string) {
@@ -95,13 +97,14 @@ export class RoomService {
     });
     if (!room) throw new NotFoundException('Room not found');
     const settings = room.settings as unknown as RoomSettings;
-    const { password, ...safeSettings } = settings;
+    const hasPassword = Boolean(settings.password);
+    const { password: _unused, ...safeSettings } = settings;
     return {
       code: room.code,
       status: room.status,
       playerCount: room.players.length,
       maxPlayers: settings.maxPlayers,
-      hasPassword: Boolean(password),
+      hasPassword,
       settings: safeSettings,
     };
   }
@@ -113,57 +116,63 @@ export class RoomService {
     userId: string | null,
     password?: string,
   ) {
-    const room = await this.prisma.room.findUnique({
-      where: { code },
-      include: { players: true },
-    });
-    if (!room) throw new NotFoundException('Room not found');
-    if (room.expiresAt && room.expiresAt < new Date()) {
-      throw new BadRequestException('Room expired');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      const room = await tx.room.findUnique({
+        where: { code },
+        include: { players: true },
+      });
+      if (!room) throw new NotFoundException('Room not found');
+      if (room.expiresAt && room.expiresAt < new Date()) {
+        throw new BadRequestException('Room expired');
+      }
 
-    const existing = room.players.find(
-      p =>
-        (userId && p.userId === userId) ||
-        (guestSessionId && p.guestSessionId === guestSessionId),
-    );
-    if (existing) {
+      const existing = room.players.find(
+        p =>
+          (userId && p.userId === userId) ||
+          (guestSessionId && p.guestSessionId === guestSessionId),
+      );
+      if (existing) {
+        return {
+          roomId: room.id,
+          roomCode: room.code,
+          playerId: existing.id,
+        };
+      }
+
+      if (room.status !== 'WAITING') {
+        throw new BadRequestException('Game already in progress');
+      }
+      const settings = room.settings as unknown as RoomSettings;
+      if (settings.password && settings.password !== password) {
+        throw new BadRequestException('Invalid password');
+      }
+      if (room.players.length >= settings.maxPlayers) {
+        throw new BadRequestException('Room is full');
+      }
+
+      if (!nickname || nickname.trim().length === 0) {
+        throw new BadRequestException('Nickname is required');
+      }
+      const player = await tx.roomPlayer.create({
+        data: {
+          roomId: room.id,
+          userId,
+          guestSessionId,
+          nicknameSnapshot: nickname,
+          role: 'PLAYER',
+        },
+      });
+
       return {
         roomId: room.id,
         roomCode: room.code,
-        playerId: existing.id,
+        playerId: player.id,
       };
-    }
-
-    if (room.status !== 'WAITING') {
-      throw new BadRequestException('Game already in progress');
-    }
-    const settings = room.settings as unknown as RoomSettings;
-    if (settings.password && settings.password !== password) {
-      throw new BadRequestException('Invalid password');
-    }
-    if (room.players.length >= settings.maxPlayers) {
-      throw new BadRequestException('Room is full');
-    }
-
-    if (!nickname || nickname.trim().length === 0) {
-      throw new BadRequestException('Nickname is required');
-    }
-    const player = await this.prisma.roomPlayer.create({
-      data: {
-        roomId: room.id,
-        userId,
-        guestSessionId,
-        nicknameSnapshot: nickname,
-        role: 'PLAYER',
-      },
+    }, {
+      isolationLevel: 'ReadCommitted',
+      maxWait: 5000,
+      timeout: 10000,
     });
-
-    return {
-      roomId: room.id,
-      roomCode: room.code,
-      playerId: player.id,
-    };
   }
 
   async getRoomById(id: string) {
@@ -181,6 +190,13 @@ export class RoomService {
     await this.prisma.room.update({
       where: { id },
       data: { status: 'WAITING' },
+    });
+  }
+
+  async updateHost(roomId: string, hostPlayerId: string) {
+    await this.prisma.room.update({
+      where: { id: roomId },
+      data: { hostPlayerId },
     });
   }
 }

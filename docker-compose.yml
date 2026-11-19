@@ -45,13 +45,15 @@ services:
     environment:
       DATABASE_URL: postgresql://drawbattle:drawbattle@postgres:5432/drawbattle?schema=public
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET environment variable is required. Generate with: openssl rand -hex 32}
       JWT_EXPIRES_IN: 7d
       PORT: 3001
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3002}
       NODE_ENV: production
     ports:
       - '3001:3001'
+    volumes:
+      - media_data:/app/apps/api/public
 
   web:
     build:
@@ -59,12 +61,14 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+        INTERNAL_API_URL: http://api:3001
     container_name: drawbattle-web
     restart: unless-stopped
     depends_on:
       - api
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+      INTERNAL_API_URL: http://api:3001
       PORT: 3002
     ports:
       - '3002:3002'
@@ -72,3 +76,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  media_data:

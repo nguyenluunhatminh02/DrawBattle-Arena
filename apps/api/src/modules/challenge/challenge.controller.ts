@@ -44,7 +44,7 @@ export class ChallengeController {
     @Req() req: any,
     @Body() body: { answer: string },
   ) {
-    const solverId = req.user?.userId || req.user?.sessionId || undefined;
+    const solverId = req.user?.id || req.guest?.sessionId || undefined;
     return this.challenge.submitGuess(id, body.answer, solverId);
   }
 }

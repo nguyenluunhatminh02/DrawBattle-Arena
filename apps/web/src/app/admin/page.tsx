@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { useGameStore } from '@/lib/store';
 
 interface Report {
   id: string;
@@ -31,17 +33,37 @@ interface FeatureFlag {
 }
 
 export default function AdminPage() {
+  const router = useRouter();
+  const player = useGameStore(s => s.player);
   const [reports, setReports] = useState<Report[]>([]);
   const [stats, setStats] = useState<ModerationStats | null>(null);
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [tab, setTab] = useState<'reports' | 'flags'>('reports');
 
   useEffect(() => {
+    if (!player?.token) {
+      setError('Please log in as an admin to access this page.');
+      setLoading(false);
+      return;
+    }
+    const headers: HeadersInit = {
+      Authorization: `Bearer ${player.token}`,
+    };
     Promise.all([
-      fetch('/api/moderation/reports').then(r => r.json()),
-      fetch('/api/moderation/stats').then(r => r.json()),
-      fetch('/api/flags').then(r => r.json()),
+      fetch('/api/moderation/reports', { headers }).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetch('/api/moderation/stats', { headers }).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetch('/api/flags', { headers }).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
     ])
       .then(([r, s, f]) => {
         setReports(r);
@@ -49,36 +71,61 @@ export default function AdminPage() {
         setFlags(f);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(err => {
+        setError(`Access denied: ${err.message}. You may not have admin privileges.`);
+        setLoading(false);
+      });
+  }, [player?.token]);
 
   async function updateReport(id: string, status: string, action?: string) {
+    if (!player?.token) return;
     try {
-      await fetch(`/api/moderation/reports/${id}`, {
+      const res = await fetch(`/api/moderation/reports/${id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${player.token}`,
+        },
         body: JSON.stringify({ status, action }),
       });
+      if (!res.ok) {
+        setError(`Failed to update report: HTTP ${res.status}`);
+        return;
+      }
       setReports(prev => prev.map(r => (r.id === id ? { ...r, status } : r)));
-      setStats(prev => prev ? {
-        ...prev,
-        pending: prev.pending + (status === 'RESOLVED' ? -1 : 0),
-        resolved: prev.resolved + (status === 'RESOLVED' ? 1 : 0),
-      } : prev);
-    } catch {}
+      setStats(prev =>
+        prev
+          ? {
+              ...prev,
+              pending: prev.pending + (status === 'RESOLVED' ? -1 : 0),
+              resolved: prev.resolved + (status === 'RESOLVED' ? 1 : 0),
+            }
+          : prev,
+      );
+    } catch {
+      setError('Network error updating report');
+    }
   }
 
   async function toggleFlag(name: string, enabled: boolean) {
+    if (!player?.token) return;
     try {
       const res = await fetch('/api/flags', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${player.token}`,
+        },
         body: JSON.stringify({ name, enabled: !enabled }),
       });
       if (res.ok) {
         setFlags(prev => prev.map(f => (f.name === name ? { ...f, enabled: !enabled } : f)));
+      } else {
+        setError(`Failed to toggle flag: HTTP ${res.status}`);
       }
-    } catch {}
+    } catch {
+      setError('Network error toggling flag');
+    }
   }
 
   if (loading) {
@@ -86,6 +133,21 @@ export default function AdminPage() {
       <div className="min-h-screen flex items-center justify-center">
         <p className="text-muted-foreground">Loading admin panel...</p>
       </div>
+    );
+  }
+
+  if (error && reports.length === 0 && flags.length === 0) {
+    return (
+      <main className="min-h-screen bg-gradient-to-br from-slate-50 to-gray-100 p-4 md:p-8 flex items-center justify-center">
+        <Card className="max-w-md">
+          <CardContent className="pt-6 text-center space-y-4">
+            <p className="text-destructive font-medium">{error}</p>
+            <Link href="/">
+              <Button variant="outline">← Home</Button>
+            </Link>
+          </CardContent>
+        </Card>
+      </main>
     );
   }
 
@@ -98,6 +160,10 @@ export default function AdminPage() {
             <Button variant="outline">← Home</Button>
           </Link>
         </div>
+
+        {error && (
+          <div className="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>
+        )}
 
         {stats && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
