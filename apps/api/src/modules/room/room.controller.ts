@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Req, UnauthorizedException, UseGuar
 import { RoomService } from './room.service';
 import { OptionalAuthGuard } from '../auth/optional-auth.guard';
 import { Throttle } from '../../common/throttle.guard';
+import { CreateRoomDto } from './room.dto';
 import type { Request } from 'express';
 
 interface IdentityRequest extends Request {
@@ -16,7 +17,7 @@ export class RoomController {
   @Post()
   @UseGuards(OptionalAuthGuard)
   @Throttle({ limit: 5, windowMs: 60_000, keyPrefix: 'room-create' })
-  async create(@Body() body: { settings?: Record<string, unknown> }, @Req() req: IdentityRequest) {
+  async create(@Body() body: CreateRoomDto, @Req() req: IdentityRequest) {
     if (req.user?.id) {
       return this.room.createRoom(
         req.user.nickname ?? 'Player',

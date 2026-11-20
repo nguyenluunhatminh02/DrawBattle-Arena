@@ -22,10 +22,21 @@ describe('getVietnamToday (DAILY-06)', () => {
 
 function createPrismaMock() {
   const today = getVietnamToday();
+  const replayStrokes = [
+    {
+      strokeId: 's1',
+      points: [
+        { x: 0.2, y: 0.2 },
+        { x: 0.8, y: 0.8 },
+      ],
+      color: '#000000',
+      width: 4,
+    },
+  ];
   const challenge = {
     id: 'd1',
     date: today,
-    replay: null,
+    replay: { id: 'r1', strokes: replayStrokes, durationMs: 3000, dailyId: 'd1' },
     word: {
       id: 'w1',
       canonical: 'mèo',
@@ -38,6 +49,14 @@ function createPrismaMock() {
     dailyChallenge: {
       findUnique: jest.fn().mockResolvedValue(challenge),
       create: jest.fn().mockResolvedValue(challenge),
+    },
+    replay: {
+      findFirst: jest.fn().mockResolvedValue({
+        id: 'r1',
+        turn: null,
+        challenge: { wordId: 'w1' },
+      }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     dailyChallengeAttempt: {
       findMany: jest.fn().mockResolvedValue([]),
@@ -71,10 +90,100 @@ describe('DailyService hardening', () => {
       dailyChallenge: prisma.dailyChallenge,
       dailyChallengeAttempt: prisma.dailyChallengeAttempt,
       streak: prisma.streak,
+      replay: prisma.replay,
+      word: prisma.word,
       $executeRaw: prisma.$executeRaw,
     };
     prisma.$transaction.mockImplementation(async (cb: (t: unknown) => unknown) => cb(tx));
     service = new DailyService(prisma as any);
+  });
+
+  it('returns a replay-backed drawing for today', async () => {
+    prisma.dailyChallenge.findUnique.mockResolvedValue({
+      id: 'd1',
+      date: getVietnamToday(),
+      replay: {
+        id: 'r1',
+        strokes: [
+          { strokeId: 's1', points: [{ x: 0, y: 0 }, { x: 1, y: 1 }], color: '#000000', width: 4 },
+        ],
+        durationMs: 3000,
+      },
+      word: { id: 'w1', difficulty: 'EASY', category: { name: 'Động vật' } },
+    });
+
+    const info = await service.getTodaysChallenge('u1');
+
+    expect(info.hasReplay).toBe(true);
+    expect(info.replay.strokes).toHaveLength(1);
+    expect(info.replay.strokes[0].strokeId).toBe('s1');
+    expect(info.replay.durationMs).toBe(3000);
+    expect(JSON.stringify(info)).not.toContain('dailyId');
+  });
+
+  it('selects a word that already has a replay when generating the daily', async () => {
+    prisma.dailyChallenge.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: 'd1',
+        date: getVietnamToday(),
+        replay: null,
+        word: { id: 'w1', difficulty: 'EASY', category: null },
+      });
+    prisma.replay.findFirst.mockResolvedValue({
+      id: 'r1',
+      turn: null,
+      challenge: { wordId: 'w1' },
+    });
+    prisma.word.findFirst.mockResolvedValue({ id: 'w1' });
+
+    await service.getTodaysChallenge();
+
+    expect(prisma.replay.findFirst).toHaveBeenCalledWith({
+      where: {
+        dailyId: null,
+        OR: [
+          { turn: { is: { word: { is: { active: true } } } } },
+          { challenge: { is: { word: { is: { active: true } } } } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        turn: { select: { wordId: true } },
+        challenge: { select: { wordId: true } },
+      },
+    });
+    expect(prisma.dailyChallenge.create).toHaveBeenCalledWith({
+      data: { date: getVietnamToday(), wordId: 'w1' },
+    });
+    expect(prisma.replay.updateMany).toHaveBeenCalledWith({
+      where: { id: 'r1', dailyId: null },
+      data: { dailyId: 'd1' },
+    });
+  });
+
+  it('falls back to an active word when no replay-backed word exists', async () => {
+    prisma.dailyChallenge.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: 'd1',
+        date: getVietnamToday(),
+        replay: null,
+        word: { id: 'w1', difficulty: 'EASY', category: null },
+      });
+    prisma.replay.findFirst.mockResolvedValue(null);
+
+    await service.getTodaysChallenge();
+
+    expect(prisma.word.findFirst).toHaveBeenCalledWith({
+      where: { active: true },
+      orderBy: { usageCount: 'asc' },
+      select: { id: true },
+    });
+    expect(prisma.replay.updateMany).not.toHaveBeenCalled();
   });
 
   it('returns answerCanonical only after a correct attempt', async () => {

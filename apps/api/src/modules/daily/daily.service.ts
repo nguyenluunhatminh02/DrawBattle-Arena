@@ -54,17 +54,52 @@ export class DailyService {
       });
       if (existing) return;
 
-      const randomWord = await tx.word.findFirst({
-        where: { active: true },
-        orderBy: { usageCount: 'asc' },
+      // The daily must show a real drawing. Prefer a word that already has a
+      // replay (created via community challenges / finished turns) and link
+      // that replay to today's challenge so every player sees the same source
+      // image. Fall back to any active word when none exist, and let the UI
+      // show a clear "no replay yet" message instead of a blank canvas.
+      const replayBackedWord = await tx.replay.findFirst({
+        where: {
+          dailyId: null,
+          OR: [
+            { turn: { is: { word: { is: { active: true } } } } },
+            { challenge: { is: { word: { is: { active: true } } } } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          turn: { select: { wordId: true } },
+          challenge: { select: { wordId: true } },
+        },
       });
-      if (!randomWord) throw new Error('No active words available');
+      const replayWordId = replayBackedWord?.turn?.wordId ?? replayBackedWord?.challenge?.wordId;
+      const word = replayWordId
+        ? await tx.word.findFirst({
+            where: { id: replayWordId, active: true },
+            select: { id: true },
+          })
+        : await tx.word.findFirst({
+            where: { active: true },
+            orderBy: { usageCount: 'asc' },
+            select: { id: true },
+          });
+      if (!word) throw new Error('No active words available');
 
-      await tx.dailyChallenge.create({
-        data: { date: today, wordId: randomWord.id },
+      const challenge = await tx.dailyChallenge.create({
+        data: { date: today, wordId: word.id },
       });
+      if (replayBackedWord && replayWordId === word.id) {
+        // replayId is unique; updateMany keeps a concurrent claim from
+        // throwing after the daily row has already been persisted.
+        await tx.replay.updateMany({
+          where: { id: replayBackedWord.id, dailyId: null },
+          data: { dailyId: challenge.id },
+        });
+      }
       await tx.word.update({
-        where: { id: randomWord.id },
+        where: { id: word.id },
         data: { usageCount: { increment: 1 } },
       });
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
@@ -129,7 +164,15 @@ export class DailyService {
           ? { name: challenge.word.category.name }
           : null,
       },
-      replay: challenge.replay,
+      // DAILY-07: expose only the drawing data the UI needs; never spread
+      // internal replay columns into a public response.
+      hasReplay: Boolean(challenge.replay),
+      replay: challenge.replay
+        ? {
+            strokes: challenge.replay.strokes,
+            durationMs: challenge.replay.durationMs,
+          }
+        : null,
       answerCanonical,
       // Explicit sanitisation even if a caller/mock supplies a richer attempt.
       userAttempt: userAttempt

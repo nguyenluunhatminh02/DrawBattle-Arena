@@ -117,8 +117,9 @@ export const api = {
     return request<{
       id: string;
       date: string;
-      word: { id: string; canonical: string; difficulty: string; category?: { name: string } };
-      replay: { strokes: unknown; durationMs: number } | null;
+      word: { id: string; difficulty: string; category?: { name: string } };
+      hasReplay: boolean;
+      replay: { strokes: Array<{ strokeId: string; points: Array<{ x: number; y: number }>; color: string; width: number }>; durationMs: number } | null;
       answerCanonical?: string;
       userAttempt: { id: string; correct: boolean; answer: string } | null;
       stats: { totalAttempts: number; correctAttempts: number; successRate: number };

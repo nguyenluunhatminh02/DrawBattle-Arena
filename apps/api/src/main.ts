@@ -4,6 +4,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { AccountBodyValidationGuard } from './common/account-body-validation.guard';
+import { parseTrustProxy } from './trust-proxy';
 
 async function bootstrap() {
   const secret = process.env.JWT_SECRET;
@@ -14,16 +15,11 @@ async function bootstrap() {
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // The API runs behind a Next.js rewrite in production and behind a Cloudflare
-  // tunnel in deployment. Express must trust the configured proxy hop count so
-  // req.ip is derived from trusted X-Forwarded-For processing rather than the
-  // raw socket address; otherwise every user shares one rate-limit bucket.
-  // TRUST_PROXY env is always a string; parse numeric hop counts correctly.
-  const trustProxy = process.env.TRUST_PROXY;
-  const parsedTrustProxy = trustProxy
-    ? (Number.isNaN(Number(trustProxy)) ? trustProxy : Number(trustProxy))
-    : 1;
-  app.set('trust proxy', parsedTrustProxy);
+  // TRUST_PROXY must be opt-in: trusting forwarded headers by default lets a
+  // direct caller spoof X-Forwarded-For and bypass per-IP rate limits. Compose
+  // and tunnel deployments set the trusted hop count explicitly; the safe
+  // default (0 / false) uses the raw socket address.
+  app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
   const origins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
     .split(',')

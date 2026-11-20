@@ -68,6 +68,60 @@ test.describe('E2E regression matrix', () => {
     expect((await room.json()).roomCode).toMatch(/^[A-Z2-9]{6}$/);
   });
 
+  test('E2E-01b daily challenge renders its replay drawing on a canvas', async ({ browser }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    // Stub the daily response so the assertion does not depend on seeded data.
+    await page.route('**/api/daily/today', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: 'daily-1',
+        date: '2026-11-20T00:00:00.000Z',
+        word: { id: 'w1', difficulty: 'EASY', category: { name: 'Động vật' } },
+        hasReplay: true,
+        replay: {
+          durationMs: 100,
+          strokes: [{
+            strokeId: 's1',
+            color: '#000000',
+            width: 4,
+            points: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.9 }],
+          }],
+        },
+        userAttempt: null,
+        stats: { totalAttempts: 0, correctAttempts: 0, successRate: 0 },
+      }),
+    }));
+    // The daily page requires an identity; seed the persisted guest token.
+    await page.addInitScript(() => {
+      localStorage.setItem('drawbattle-store', JSON.stringify({
+        state: {
+          player: { token: 'test-guest-token', playerId: 'p1', nickname: 'DailyTester' },
+          token: null,
+        },
+        version: 0,
+      }));
+    });
+    await page.goto(`${WEB}/daily`);
+    await page.waitForFunction(() => !!document.querySelector('input[placeholder="Nhập đáp án..."]'), null, {
+      timeout: 15000,
+    });
+    const canvas = page.getByTestId('daily-replay-canvas');
+    await expect(canvas).toBeVisible();
+    // A real drawing must be painted, not an empty white canvas.
+    const painted = await canvas.evaluate((el: HTMLCanvasElement) => {
+      const ctx = el.getContext('2d')!;
+      const data = ctx.getImageData(0, 0, el.width, el.height).data;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) return true;
+      }
+      return false;
+    });
+    expect(painted).toBe(true);
+    await ctx.close();
+  });
+
   test('E2E-02 private match details are not enumerable', async ({ request }) => {
     const listed = await request.get(`${API}/api/matches?limit=20`);
     expect(listed.ok()).toBeTruthy();
