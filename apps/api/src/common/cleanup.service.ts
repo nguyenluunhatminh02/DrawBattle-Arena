@@ -19,6 +19,10 @@ export class CleanupService implements OnModuleInit, OnModuleDestroy {
 
   /** Hard cap for bulk delete batches; keeps each cleanup pass short. */
   private readonly BATCH_SIZE = 500;
+  /** Product funnel events are analytics only: keep 30 days of history. */
+  private readonly FUNNEL_EVENT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  /** Failed render jobs have exhausted their retries and are no longer useful. */
+  private readonly RENDER_JOB_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
   async run() {
     const now = new Date();
@@ -34,9 +38,12 @@ export class CleanupService implements OnModuleInit, OnModuleDestroy {
     // in the DB forever. RoomBans intentionally do NOT block cleanup: they
     // reference the guest with ON DELETE SET NULL, and each pass is bounded.
     const guests = await this.safely('guest sessions', () => this.deleteExpiredGuests(now));
-    if (rooms || challenges || guests) {
+    const funnelEvents = await this.safely('funnel events', () => this.deleteOldFunnelEvents(now));
+    const renderJobs = await this.safely('render jobs', () => this.deleteOldRenderJobs(now));
+    if (rooms || challenges || guests || funnelEvents || renderJobs) {
       this.logger.log(
-        `Cleaned: ${rooms} rooms, ${challenges} challenges expired, ${guests} guest sessions`,
+        `Cleaned: ${rooms} rooms, ${challenges} challenges expired, ${guests} guest sessions, ` +
+          `${funnelEvents} funnel events, ${renderJobs} render jobs`,
       );
     }
   }
@@ -87,6 +94,44 @@ export class CleanupService implements OnModuleInit, OnModuleDestroy {
         expiresAt: { lt: now },
         roomPlayers: { every: { leftAt: { not: null } } },
         dailyChallengeAttempts: { none: {} },
+      },
+    });
+    return result.count;
+  }
+
+  /** Bounded by id so a missing optional table is a logged no-op, not a crash. */
+  private async deleteOldFunnelEvents(now: Date): Promise<number> {
+    if (!this.prisma.hasOptionalTable?.('funnelEvent')) return 0;
+    const cutoff = new Date(now.getTime() - this.FUNNEL_EVENT_TTL_MS);
+    const candidates = await this.prisma.funnelEvent.findMany({
+      where: { createdAt: { lt: cutoff } },
+      select: { id: true },
+      take: this.BATCH_SIZE,
+      orderBy: { createdAt: 'asc' },
+    });
+    if (candidates.length === 0) return 0;
+    const result = await this.prisma.funnelEvent.deleteMany({
+      where: { id: { in: candidates.map(event => event.id) }, createdAt: { lt: cutoff } },
+    });
+    return result.count;
+  }
+
+  /** Keep queued/running work intact; only prune old terminal failures. */
+  private async deleteOldRenderJobs(now: Date): Promise<number> {
+    if (!this.prisma.hasOptionalTable?.('renderJob')) return 0;
+    const cutoff = new Date(now.getTime() - this.RENDER_JOB_TTL_MS);
+    const candidates = await this.prisma.renderJob.findMany({
+      where: { state: 'failed', updatedAt: { lt: cutoff } },
+      select: { id: true },
+      take: this.BATCH_SIZE,
+      orderBy: { updatedAt: 'asc' },
+    });
+    if (candidates.length === 0) return 0;
+    const result = await this.prisma.renderJob.deleteMany({
+      where: {
+        id: { in: candidates.map(job => job.id) },
+        state: 'failed',
+        updatedAt: { lt: cutoff },
       },
     });
     return result.count;

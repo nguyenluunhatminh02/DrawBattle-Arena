@@ -10,9 +10,13 @@ export class FunnelController {
   // Public tracking endpoint: must remain reachable by every visitor.
   @Post('event')
   @Throttle({ limit: 120, windowMs: 60_000, keyPrefix: 'analytics-event' })
-  track(@Body() body: { event: string; sessionId?: string; data?: Record<string, unknown> }) {
+  track(@Body() body: { event?: unknown; sessionId?: unknown; data?: unknown }) {
     const payload = body ?? {};
-    return this.funnel.track(payload.event, payload.sessionId, payload.data);
+    return this.funnel.track(
+      typeof payload.event === 'string' ? payload.event : '',
+      typeof payload.sessionId === 'string' ? payload.sessionId : undefined,
+      payload.data as Record<string, unknown> | undefined,
+    );
   }
 
   // Aggregated funnel data is admin-only.

@@ -51,21 +51,41 @@ export class FunnelService implements OnModuleDestroy {
   private readonly logger = new Logger(FunnelService.name);
   private readonly events: FunnelEvent[] = [];
   private readonly pending: FunnelEvent[] = [];
-  private readonly durable: boolean;
+  private durable = false;
+  private checkingDurable: Promise<void> | null = null;
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
 
   constructor(private readonly prisma?: PrismaService) {
-    this.durable = !!prisma?.hasOptionalTable?.('funnelEvent');
-    if (this.durable) {
+    if (prisma?.hasOptionalTable?.('funnelEvent')) {
+      // A generated delegate does not prove the migration has run. Probe the
+      // table once; if it does not exist, stay in memory-only mode.
+      this.checkingDurable = this.checkDurability();
+    } else {
+      this.warnUnavailable();
+    }
+  }
+
+  private async checkDurability() {
+    try {
+      await this.prisma!.funnelEvent.findFirst({
+        select: { id: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      this.durable = true;
       this.flushTimer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
       this.flushTimer.unref?.();
-    } else {
-      logFunnelUnavailable(
-        this.logger,
-        'funnel_events table unavailable; analytics are kept in memory only and lost on restart',
-      );
+    } catch (err) {
+      this.warnUnavailable(err);
     }
+  }
+
+  private warnUnavailable(err?: unknown) {
+    const suffix = err ? ` (${err instanceof Error ? err.message : String(err)})` : '';
+    logFunnelUnavailable(
+      this.logger,
+      `funnel_events table unavailable; analytics are kept in memory only and lost on restart${suffix}`,
+    );
   }
 
   get isDurable() {
@@ -74,7 +94,12 @@ export class FunnelService implements OnModuleDestroy {
 
   async onModuleDestroy() {
     if (this.flushTimer) clearInterval(this.flushTimer);
-    await this.flush();
+    // Wait for the capability probe so events queued during startup are not
+    // discarded, then flush every pending batch and any in-flight flush.
+    await this.checkingDurable;
+    while (this.pending.length > 0 || this.flushing) {
+      await this.flush();
+    }
   }
 
   async track(event: string, sessionId?: string, data?: Record<string, unknown>) {
@@ -85,7 +110,9 @@ export class FunnelService implements OnModuleDestroy {
     const cleanData = sanitizeData(data);
     const item: FunnelEvent = {
       event,
-      sessionId: (sessionId ?? 'anon').slice(0, 128),
+      // JSON bodies can carry numbers, objects or arrays in this field. Never
+      // call a string method on an untrusted value.
+      sessionId: typeof sessionId === 'string' ? sessionId.slice(0, 128) : 'anon',
       data: cleanData,
       ts: Date.now(),
     };
@@ -95,20 +122,28 @@ export class FunnelService implements OnModuleDestroy {
     }
     this.events.push(item);
 
-    if (!this.durable) return { ok: true, durable: false };
+    if (!this.durable || !this.prisma) {
+      return { ok: true, durable: false };
+    }
 
     this.pending.push(item);
     if (this.pending.length >= FLUSH_BATCH_SIZE) await this.flush();
     return { ok: true, durable: true };
   }
 
-  /** Flush queued events. Bounded so a slow DB never stalls a request queue. */
+  /** Flush one queued batch. Bounded so a slow DB never stalls a request queue. */
   async flush() {
-    if (!this.durable || !this.prisma || this.flushing) return this.flushing ?? undefined;
+    if (!this.durable || !this.prisma) return;
+    // A concurrent caller must await the active write instead of splicing a
+    // second batch into an already drained queue.
+    if (this.flushing) {
+      await this.flushing;
+      return;
+    }
     if (this.pending.length === 0) return;
 
     const batch = this.pending.splice(0, FLUSH_BATCH_SIZE);
-    this.flushing = (async () => {
+    const write = (async () => {
       try {
         await this.prisma!.funnelEvent.createMany({
           data: batch.map(item => ({
@@ -126,10 +161,11 @@ export class FunnelService implements OnModuleDestroy {
         // Do not retry a permanently failed batch forever (e.g. missing table).
       }
     })();
+    this.flushing = write;
     try {
-      await this.flushing;
+      await write;
     } finally {
-      this.flushing = null;
+      if (this.flushing === write) this.flushing = null;
     }
   }
 
@@ -140,8 +176,15 @@ export class FunnelService implements OnModuleDestroy {
     const counts: Record<string, number> = {};
     for (const event of TRACKED_EVENTS) counts[event] = 0;
 
+    // Pending events have not reached the table yet, and an in-flight flush
+    // may still be writing its batch. A pending event is the same object as its
+    // in-memory copy, so deduplicate by identity before counting.
+    const bufferedItems = new Set<FunnelEvent>(this.events);
+    for (const item of this.pending) bufferedItems.add(item);
+    const buffered = [...bufferedItems].map(e => ({ ...e, ts: e.ts }));
+
     if (!this.durable || !this.prisma) {
-      return this.summarize(counts, this.events.map(e => ({ ...e, ts: e.ts })), last24h);
+      return this.summarize(counts, buffered, last24h);
     }
 
     try {
@@ -153,7 +196,10 @@ export class FunnelService implements OnModuleDestroy {
       });
       return this.summarize(
         counts,
-        rows.map(row => ({ event: row.event, sessionId: row.sessionId, ts: 0 })),
+        [
+          ...rows.map(row => ({ event: row.event, sessionId: row.sessionId, ts: 0 })),
+          ...buffered,
+        ],
         last24h,
       );
     } catch (err) {
@@ -161,7 +207,7 @@ export class FunnelService implements OnModuleDestroy {
         this.logger,
         `funnel summary fell back to memory (${err instanceof Error ? err.message : String(err)})`,
       );
-      return this.summarize(counts, this.events, last24h);
+      return this.summarize(counts, buffered, last24h);
     }
   }
 
