@@ -3,7 +3,9 @@ RUN corepack enable && corepack prepare pnpm@9 --activate
 WORKDIR /app
 
 FROM base AS deps
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache \
+  python3 make g++ pkgconf \
+  cairo-dev pango-dev jpeg-dev giflib-dev librsvg-dev
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY packages/shared/package.json packages/shared/
 COPY apps/api/package.json apps/api/
@@ -14,9 +16,12 @@ COPY --from=deps /app ./
 COPY tsconfig.json ./
 COPY packages ./packages
 COPY apps/api ./apps/api
-RUN pnpm --filter @drawbattle/shared build && pnpm --filter @drawbattle/api build && pnpm --filter @drawbattle/api exec prisma generate
+RUN pnpm --filter @drawbattle/api exec prisma generate && \
+  pnpm --filter @drawbattle/shared build && \
+  pnpm --filter @drawbattle/api build
 
 FROM node:20-alpine AS runtime
+RUN apk add --no-cache cairo pango jpeg giflib librsvg
 RUN corepack enable && corepack prepare pnpm@9 --activate
 WORKDIR /app
 ENV NODE_ENV=production
