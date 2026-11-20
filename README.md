@@ -26,7 +26,10 @@ Open http://localhost:3002.
 
 ## Status
 
-**Production-ready** with known architectural limitations (see Known Limitations below).
+**Not production-ready.** This is a functional prototype with passing automated
+regression tests, but it has known architectural, security and operational
+limits (see [Known Limitations](#known-limitations)). Do not expose it to
+untrusted public traffic without the work listed there.
 
 ### Recent Security & Correctness Fixes (Nov 2026)
 - ✅ NestJS DI: Fixed module imports for AdminGuard
@@ -41,10 +44,18 @@ Open http://localhost:3002.
 - ✅ Replay worker: Concurrency limits (max 3 active jobs)
 
 ### Known Limitations
-- **Multi-instance**: Redis adapter for broadcast only; game state still in-memory per process
-- **Crash recovery**: Match in progress lost on server restart
-- **Next.js 14.2.4**: 75 security advisories (5 critical) — upgrade recommended before production
-- **Leaderboard**: All-time capped at 2000 most recent matches
+These are open architecture/operations gaps, not covered by the regression suite:
+
+- **Multi-instance**: Redis adapter broadcasts Socket.IO events only; authoritative game state (timers, turns, scores, strokes) is in-memory per API process. A room is pinned to one instance via a Redis ownership key; there is no state handoff or cross-node recovery.
+- **Crash recovery**: An in-progress match is lost when its API process restarts; only finished matches are persisted.
+- **Dependency security**: Next.js 14.2.4 has published security advisories; upgrade and re-audit dependencies before any public deployment.
+- **Leaderboard**: All-time view is capped at the 2000 most recent matches; rankings are approximate.
+- **Rate limiting**: In-process in-memory buckets; limits reset on restart and are not shared across instances. Authenticated identity keys and `TRUST_PROXY` mitigate spoofing but do not make it distributed.
+- **Persistence/retention**: Drawings (strokes) and guesses are stored with finished matches and replay rows; there is no automated retention/privacy deletion job yet.
+- **Replay rendering**: GIF worker queue is in-memory, capped at 3 concurrent jobs, with no durable queue or retry after process restart.
+- **Admission control**: No load shedding or admission queue; overload can exhaust the API process.
+- **Observability**: Structured logs only; no distributed tracing, metrics, or alerting.
+- **Deployment/rollback**: Compose is suitable for a single host. `scripts/rollback-check.sh` documents the rollback procedure; automated image/DB snapshot rollback must be wired per environment.
 
 ## Features (implemented)
 
@@ -109,7 +120,9 @@ packages/
 ## Testing
 
 ```bash
-pnpm --filter @drawbattle/api test          # 28 unit tests
+pnpm --filter @drawbattle/api test          # unit + in-memory regression specs
+pnpm --filter @drawbattle/api test:integration  # TEST-01..TEST-14 against PostgreSQL/Redis
+bash scripts/test-migration-clean.sh        # clean DB migration check
 node apps/web/socket-e2e.mjs                # classic 2-player match
 node apps/web/socket-modes-e2e.mjs speed    # SPEED mode
 node apps/web/socket-modes-e2e.mjs duel     # DUEL mode
@@ -118,8 +131,19 @@ node apps/web/socket-modes-e2e.mjs ab       # A/B flag
 node apps/web/socket-stream-e2e.mjs         # stroke streaming + merge
 node apps/web/socket-room-e2e.mjs           # room management
 node apps/web/socket-load.mjs               # load test (env: LOAD_ROOMS, LOAD_PLAYERS)
-npx playwright test                         # browser e2e (4 tests)
+npx playwright test                         # browser + HTTP e2e (E2E-01..E2E-10)
+SMOKE_API_URL=http://localhost:3001 SMOKE_WEB_URL=http://localhost:3002 bash scripts/smoke-test.sh
+bash scripts/rollback-check.sh              # health check + rollback guidance
 ```
+
+Integration tests need `DATABASE_URL` and `REDIS_URL` pointing at a migrated
+database and Redis instance (CI provisions both as service containers). The
+Playwright suite expects the API on `:3001` and web on `:3002`; override with
+`E2E_API_URL` / `E2E_WEB_URL`.
+
+CI runs: install/build → migrate → seed → typecheck → unit tests → DB
+integration tests → clean migration check → builds → Playwright e2e →
+post-deploy smoke check.
 
 ## Docker
 

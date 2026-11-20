@@ -123,5 +123,6 @@ describe('ChallengeService hardening', () => {
   it('throws NotFound for unknown challenges', async () => {
     prisma.challenge.findUnique.mockResolvedValue(null);
     await expect(service.getInfo('missing')).rejects.toThrow(NotFoundException);
-  });
+
+});
 });

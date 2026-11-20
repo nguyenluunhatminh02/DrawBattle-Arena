@@ -59,22 +59,40 @@ jobs:
           DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
         run: pnpm --filter @drawbattle/api exec prisma migrate deploy
 
+      # Integration tests create challenges, which require at least one word.
+      - name: Seed database
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+        run: pnpm --filter @drawbattle/api db:seed
+
       - name: Typecheck
         run: pnpm -r typecheck
 
       - name: Unit tests
         run: pnpm --filter @drawbattle/api test
 
+      # TEST-01..TEST-14: DB-backed regressions run against the PostgreSQL and
+      # Redis services declared on this job. Prisma migrations are applied above.
+      - name: Integration tests (PostgreSQL + Redis)
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: ci-test-secret-with-at-least-32-chars
+        run: pnpm --filter @drawbattle/api test:integration
+
+      - name: Clean DB migration check
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+        run: |
+          # A second migrate deploy on an already-migrated DB must be a no-op.
+          pnpm --filter @drawbattle/api exec prisma migrate deploy
+          pnpm --filter @drawbattle/api exec prisma migrate status
+
       - name: Build API
         run: pnpm --filter @drawbattle/api build
 
       - name: Build Web
         run: pnpm --filter @drawbattle/web build
-
-      - name: Seed database
-        env:
-          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
-        run: pnpm --filter @drawbattle/api db:seed
 
       - name: Install Playwright browsers
         run: pnpm --filter @drawbattle/web exec playwright install --with-deps chromium
@@ -114,10 +132,18 @@ jobs:
           cat /tmp/drawbattle-web.log
           exit 1
 
+      # E2E-01..E2E-10: browser and HTTP contract regressions.
       - name: Playwright e2e tests
         env:
           DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
         run: pnpm --filter @drawbattle/web test:e2e
+
+      # Same checks as the post-deploy smoke test, against the CI-deployed app.
+      - name: Post-deploy smoke / health check
+        env:
+          SMOKE_API_URL: http://localhost:3001
+          SMOKE_WEB_URL: http://localhost:3002
+        run: ./scripts/smoke-test.sh
 
       - name: Stop e2e services
         if: always()
