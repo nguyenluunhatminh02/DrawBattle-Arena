@@ -80,7 +80,7 @@ export default function HistoryPage() {
                 {m.rankings.map(r => (
                   <div key={r.playerId} className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 text-sm odd:bg-arena-800/30">
                     <div className="flex min-w-0 items-center gap-3">
-                      <span className="score-number w-7 shrink-0 font-bold text-primary">#{r.rank}</span>
+                      <span className="score-number w-7 shrink-0 font-bold text-warning">#{r.rank}</span>
                       <span className="truncate text-on-arena">{r.nickname}</span>
                     </div>
                     <span className="score-number shrink-0 font-medium text-on-arena">{r.points} pts</span>

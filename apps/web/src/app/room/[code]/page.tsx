@@ -594,14 +594,14 @@ export default function RoomPage() {
     <div className="h-[100dvh] flex flex-col text-on-arena">
       <header className="flex items-center justify-between gap-1.5 px-3 md:px-4 py-2 safe-top arena-bg border-b border-panel-border/30">
         <div className="flex items-center gap-1.5 md:gap-3 min-w-0">
-          <h1 className="font-black text-primary text-sm md:text-base shrink-0 tracking-tight">DrawBattle</h1>
+          <h1 className="font-black text-on-arena text-sm md:text-base shrink-0 tracking-tight">DrawBattle</h1>
           <Badge variant="outline" className="shrink-0 font-mono border-panel-border/40 text-on-arena">{code}</Badge>
           {room?.settings.mode && room.settings.mode !== 'CLASSIC' && (
             <Badge variant="secondary" className="shrink-0 hidden xs:inline-flex sm:inline-flex">
               {room.settings.mode === 'DUEL' ? '1v1' : room.settings.mode === 'SPEED' ? 'Speed' : 'Đội'}
             </Badge>
           )}
-          <span className={`hidden sm:inline text-xs shrink-0 ${connected ? 'text-success' : 'text-destructive'}`}>
+          <span className={`hidden sm:inline text-xs shrink-0 ${connected ? 'text-success' : 'text-danger-on-arena'}`}>
             {connected ? '● trực tuyến' : '○ mất kết nối'}
           </span>
         </div>
@@ -611,13 +611,13 @@ export default function RoomPage() {
           )}
           {drawerOrder && currentPhase && currentPhase !== 'WAITING' && (
             <div className="hidden md:block text-xs text-muted-on-arena">
-              Thứ tự: {drawerOrder.map((d, i) => <span key={d.id} className={d.id === drawerId ? 'font-bold text-primary' : ''}>{i > 0 && ' → '}{d.nickname}</span>)}
+              Thứ tự: {drawerOrder.map((d, i) => <span key={d.id} className={d.id === drawerId ? 'font-bold text-accent-on-arena' : ''}>{i > 0 && ' → '}{d.nickname}</span>)}
             </div>
           )}
           <Button size="sm" variant="outline" onClick={copyLink} className="shrink-0 h-11 px-3 border-panel-border/40 bg-transparent text-on-arena hover:bg-panel">
             <span className="hidden md:inline">Copy Link</span><span className="md:hidden">Link</span>
           </Button>
-          <Button size="sm" variant="ghost" className="text-destructive shrink-0 h-11 px-3" onClick={() => {
+          <Button size="sm" variant="ghost" className="text-danger-on-arena shrink-0 h-11 px-3" onClick={() => {
             if (confirm('Bạn có chắc muốn rời phòng?')) {
               getSocket()?.emit('room:leave');
             }
@@ -628,7 +628,7 @@ export default function RoomPage() {
       </header>
 
       {errorMsg && (
-        <div className="px-4 py-2 bg-destructive/10 text-destructive text-sm">{errorMsg}</div>
+        <div className="px-4 py-2 bg-destructive/10 text-danger-on-arena text-sm">{errorMsg}</div>
       )}
 
       {teams && currentPhase && currentPhase !== 'WAITING' && currentPhase !== 'MATCH_RESULT' && (
@@ -672,7 +672,7 @@ export default function RoomPage() {
                       <div key={p.id} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-panel/50 border border-panel-border/20">
                         <span className="truncate min-w-0 text-sm">{p.nickname}{p.id === myPlayerId ? ' (bạn)' : ''}</span>
                         <div className="flex gap-1 items-center flex-wrap justify-end shrink-0">
-                          {!p.isOnline && <Badge variant="outline" className="border-destructive/50 text-destructive">Ngoại tuyến</Badge>}
+                          {!p.isOnline && <Badge variant="outline" className="border-danger-on-arena/50 text-danger-on-arena">Ngoại tuyến</Badge>}
                           {p.isReady && <Badge className="bg-success text-white">Sẵn sàng</Badge>}
                           {p.isOnline && !p.isReady && !p.isHost && <Badge variant="outline" className="text-muted-on-arena font-normal border-panel-border/30">Chưa sẵn sàng</Badge>}
                           {p.isMuted && <Badge variant="secondary">Đã tắt tiếng</Badge>}
@@ -751,7 +751,7 @@ export default function RoomPage() {
                         Bắt đầu ({room.players.length}/{room.settings.maxPlayers})
                       </Button>
                       {notReady.length > 0 && room.players.length >= getModeConfig(room.settings.mode ?? 'CLASSIC').minPlayers && (
-                        <p className="text-center text-xs text-muted-foreground">
+                        <p className="text-center text-xs text-muted-on-arena">
                           Chờ sẵn sàng: {notReady.map(p => p.nickname).join(', ')}
                         </p>
                       )}
@@ -769,7 +769,7 @@ export default function RoomPage() {
                       >
                         {room.players.find(p => p.id === myPlayerId)?.isReady ? 'Bỏ sẵn sàng' : 'Sẵn sàng'}
                       </Button>
-                      <p className="text-center text-muted-foreground text-sm">Đang chờ host bắt đầu...</p>
+                      <p className="text-center text-muted-on-arena text-sm">Đang chờ host bắt đầu...</p>
                     </>
                   )}
                 </CardContent>
@@ -782,7 +782,7 @@ export default function RoomPage() {
               <Card className="w-full max-w-lg">
                 <CardContent className="pt-6 space-y-4">
                   <h2 className="text-xl font-semibold text-center">Chọn từ để vẽ</h2>
-                  <p className="text-center text-muted-foreground">{timeLeft}s</p>
+                  <p className="text-center text-muted-on-arena">{timeLeft}s</p>
                   <div className="grid gap-3">
                     {wordOptions.map(w => (
                       <Button key={w.id} variant="outline" size="lg" onClick={() => handleChooseWord(w.id)}>
@@ -798,7 +798,7 @@ export default function RoomPage() {
 
           {currentPhase === 'WORD_PICK' && !showWordPicker && (
             <div className="flex-1 flex items-center justify-center">
-              <p className="text-muted-foreground">{drawerName} đang chọn từ...</p>
+              <p className="text-muted-on-arena">{drawerName} đang chọn từ...</p>
             </div>
           )}
 
@@ -832,7 +832,7 @@ export default function RoomPage() {
               <Card className="w-full max-w-md panel-arena border-0 shadow-panel text-on-arena">
                 <CardContent className="pt-6 space-y-4 text-center">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-on-arena">Đáp án</p>
-                  <h2 className="text-3xl md:text-4xl font-black tracking-tight text-primary">{revealWord}</h2>
+                  <h2 className="text-3xl md:text-4xl font-black tracking-tight text-accent-on-arena">{revealWord}</h2>
                   <p className="text-sm text-muted-on-arena">Người đoán đúng:</p>
                   <div className="flex flex-wrap gap-2 justify-center">
                     {revealGuessers.map(id => {
@@ -851,7 +851,7 @@ export default function RoomPage() {
           {currentPhase === 'NEXT_TURN' && (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
-                <p className="text-2xl font-bold text-primary animate-pulse">Lượt tiếp theo...</p>
+                <p className="text-2xl font-bold text-accent-on-arena animate-pulse">Lượt tiếp theo...</p>
               </div>
             </div>
           )}
@@ -885,7 +885,7 @@ export default function RoomPage() {
                     <div className="text-center p-4 bg-warning/10 rounded-xl border-2 border-warning/60">
                       <p className="text-4xl" aria-hidden>🏆</p>
                       <p className="text-lg font-bold">{matchResults.rankings[0].nickname}</p>
-                      <p className="text-3xl font-black text-primary score-number">{matchResults.rankings[0].points} điểm</p>
+                      <p className="text-3xl font-black text-accent-on-arena score-number">{matchResults.rankings[0].points} điểm</p>
                     </div>
                   )}
                   <div className="space-y-2">
@@ -895,7 +895,7 @@ export default function RoomPage() {
                           <span className="text-lg font-bold text-muted-on-arena score-number">#{r.rank}</span>
                           <span className="font-medium">{r.nickname}</span>
                         </div>
-                        <span className="font-bold text-primary score-number">{r.points} điểm</span>
+                        <span className="font-bold text-accent-on-arena score-number">{r.points} điểm</span>
                       </div>
                     ))}
                   </div>

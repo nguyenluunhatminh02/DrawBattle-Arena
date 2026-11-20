@@ -246,14 +246,14 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
           <div className="flex gap-1 shrink-0">
             <button
               onClick={() => setTool('pen')}
-              className={`w-11 h-11 rounded flex items-center justify-center text-base text-on-arena ${tool === 'pen' ? 'bg-primary font-bold' : 'bg-panel'}`}
+              className={`w-11 h-11 rounded flex items-center justify-center text-base ${tool === 'pen' ? 'bg-primary font-bold text-primary-foreground' : 'bg-panel text-on-arena'}`}
               title="Bút"
             >
               ✏️
             </button>
             <button
               onClick={() => setTool('eraser')}
-              className={`w-11 h-11 rounded flex items-center justify-center text-base text-on-arena ${tool === 'eraser' ? 'bg-primary font-bold' : 'bg-panel'}`}
+              className={`w-11 h-11 rounded flex items-center justify-center text-base ${tool === 'eraser' ? 'bg-primary font-bold text-primary-foreground' : 'bg-panel text-on-arena'}`}
               title="Tẩy"
             >
               🧹
@@ -265,7 +265,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
                 <button
                   key={c}
                   onClick={() => setColor(c)}
-                  className={`w-11 h-11 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-white/20'}`}
+                  className={`w-11 h-11 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-white/40'}`}
                   style={{ backgroundColor: c }}
                   aria-label={`Màu ${c}`}
                   aria-pressed={color === c}
@@ -278,7 +278,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
               <button
                 key={s}
                 onClick={() => setBrushSize(s)}
-                className={`w-11 h-11 rounded flex items-center justify-center text-on-arena ${brushSize === s ? 'bg-primary' : 'bg-panel'}`}
+                className={`w-11 h-11 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary text-primary-foreground' : 'bg-panel text-on-arena'}`}
                 aria-label={`Cỡ nét ${s}`}
                 aria-pressed={brushSize === s}
               >
@@ -286,10 +286,10 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
               </button>
             ))}
           </div>
-          <Button variant="outline" size="sm" onClick={onUndo} className="ml-auto shrink-0" disabled={strokes.length === 0}>
+          <Button size="sm" onClick={onUndo} className="ml-auto shrink-0" disabled={strokes.length === 0}>
             ↶
           </Button>
-          <Button variant="outline" size="sm" onClick={onClear} className="shrink-0">
+          <Button variant="secondary" size="sm" onClick={onClear} className="shrink-0">
             Xóa
           </Button>
         </div>

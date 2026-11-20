@@ -61,6 +61,8 @@ const config: Config = {
         warning: 'hsl(var(--warning))',
         'team-a': 'hsl(var(--team-a))',
         'team-b': 'hsl(var(--team-b))',
+        'accent-on-arena': 'hsl(var(--accent-on-arena))',
+        'danger-on-arena': 'hsl(var(--danger-on-arena))',
       },
       fontFamily: {
         sans: ['var(--font-inter)', 'ui-sans-serif', 'system-ui', 'sans-serif'],

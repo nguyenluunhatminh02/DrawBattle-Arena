@@ -16,7 +16,7 @@ export function PageHeader({ title, subtitle, actions, backHref }: PageHeaderPro
           {backHref && (
             <Link
               href={backHref}
-              className="text-on-arena hover:text-white transition-colors text-sm font-medium shrink-0"
+              className="text-on-arena hover:text-accent-on-arena transition-colors text-sm font-medium shrink-0"
               aria-label="Quay lại"
             >
               ← Về
