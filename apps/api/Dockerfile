@@ -23,7 +23,7 @@ RUN pnpm --filter @drawbattle/api exec prisma generate && \
 
 FROM node:20-bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  openssl ca-certificates \
+  openssl ca-certificates postgresql-client \
   libcairo2 libpango-1.0-0 libjpeg62-turbo libgif7 librsvg2-2 \
   && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
@@ -37,6 +37,8 @@ COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /app/apps/api/prisma ./apps/api/prisma
 COPY --from=build /app/apps/api/package.json ./apps/api/package.json
+# Seed only when the word catalogue is empty. The seed script uses upserts, so
+# re-running it against a populated database cannot duplicate words.
 EXPOSE 3001
 WORKDIR /app/apps/api
-CMD ["sh", "-c", "pnpm exec prisma migrate deploy && node dist/main"]
+CMD ["sh", "-c", "set -e; pnpm exec prisma migrate deploy; WORD_COUNT=$(psql \"$DATABASE_URL\" -tAc 'SELECT count(*) FROM words'); if [ \"$WORD_COUNT\" = '0' ]; then echo 'Seeding empty word catalogue'; pnpm exec tsx prisma/seed.ts; else echo \"Word catalogue has $WORD_COUNT words; skipping seed\"; fi; exec node dist/main"]

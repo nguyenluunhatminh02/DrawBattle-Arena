@@ -104,6 +104,10 @@ jobs:
           JWT_SECRET: ci-test-secret-with-at-least-32-chars
           CORS_ORIGIN: http://localhost:3002
           PORT: 3001
+          # E2E tests use X-Forwarded-For to give each client its own throttle
+          # bucket. The API ignores forwarded headers by default (production
+          # stays at 0); only this local CI process trusts the one proxy hop.
+          TRUST_PROXY: 1
         run: |
           pnpm --filter @drawbattle/api start > /tmp/drawbattle-api.log 2>&1 &
           echo $! > /tmp/drawbattle-api.pid

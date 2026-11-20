@@ -26,7 +26,15 @@ Log format is Nest's default line-oriented console output. No request ids, room 
 
 ### External health checks
 
-`docker-compose.yml` health checks exist for PostgreSQL (`pg_isready`) and Redis (`redis-cli ping`). There is no API or web health endpoint.
+`docker-compose.yml` defines health checks for all four services: PostgreSQL
+uses `pg_isready`, Redis uses `redis-cli ping`, the API uses Node's built-in
+`fetch` to GET `/api/flags` on `:3001` (its Debian-slim image has no `wget` or
+`curl`), and the web container uses `wget` to GET `/` on `:3002`. The web
+service waits for `api` to become healthy before starting.
+These are liveness probes only: they confirm that the HTTP process answers, not
+that Prisma, Redis pub/sub or in-memory room state are healthy. There is still
+**no dedicated `/health` endpoint** that reports DB connectivity or
+`redisAdapter.isEnabled()`.
 
 ## 2. Minimal metrics endpoint (implemented)
 

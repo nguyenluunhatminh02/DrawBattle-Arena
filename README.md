@@ -4,7 +4,7 @@ Realtime multiplayer drawing & guessing game — draw a word, share a link, have
 
 ## Stack
 
-- **Frontend:** Next.js 14 (App Router) + Tailwind CSS + shadcn/ui + Zustand
+- **Frontend:** Next.js 15 (App Router) + Tailwind CSS + shadcn/ui + Zustand
 - **Backend:** NestJS + Socket.IO + Prisma
 - **Database:** PostgreSQL 16
 - **Cache/Broadcast:** Redis (Socket.IO adapter for multi-instance)
@@ -14,7 +14,7 @@ Realtime multiplayer drawing & guessing game — draw a word, share a link, have
 
 ```bash
 pnpm install
-docker compose up -d postgres redis    # PostgreSQL :5440, Redis :6379
+docker compose up -d postgres redis    # PostgreSQL :5440, Redis :6390 (host binds are loopback-only)
 pnpm --filter @drawbattle/api db:generate
 pnpm --filter @drawbattle/api exec prisma migrate deploy
 pnpm --filter @drawbattle/api db:seed  # 163 Vietnamese words
@@ -42,19 +42,21 @@ untrusted public traffic without the work listed there.
 - ✅ Daily challenge: Word answer no longer leaked in API
 - ✅ Drawer reconnect: Private word event on rejoin
 - ✅ Replay worker: Concurrency limits (max 3 active jobs)
+- ✅ Redis throttling: Shared HTTP buckets recover automatically after transient Redis failures (process-local fallback while Redis is unavailable)
+- ✅ Replay reconciliation: Orphaned replay rows are reconciled and render workers shut down cleanly on restart
 
 ### Known Limitations
 These are open architecture/operations gaps, not covered by the regression suite:
 
 - **Multi-instance**: Redis adapter broadcasts Socket.IO events only; authoritative game state (timers, turns, scores, strokes) is in-memory per API process. A room is pinned to one instance via a Redis ownership key; there is no state handoff or cross-node recovery.
 - **Crash recovery**: An in-progress match is lost when its API process restarts; only finished matches are persisted.
-- **Dependency security**: Next.js 14.2.4 has published security advisories; upgrade and re-audit dependencies before any public deployment.
+- **Dependency security**: The app now uses Next.js 15.5.29 and the current `pnpm audit --prod` baseline is **3 advisories** (1 high, 2 moderate); re-audit dependencies before any public deployment (see [docs/failure-scenarios.md](./docs/failure-scenarios.md#15-production-dependency-advisories-after-p1-04)).
 - **Leaderboard**: All-time view is capped at the 2000 most recent matches; rankings are approximate.
-- **Rate limiting**: In-process in-memory buckets; limits reset on restart and are not shared across instances. Authenticated identity keys and `TRUST_PROXY` mitigate spoofing but do not make it distributed.
+- **Rate limiting**: Shared fixed-window buckets in Redis when `REDIS_URL` is reachable, with a process-local fallback during Redis outages. Authenticated identity keys and `TRUST_PROXY` mitigate spoofing but the fallback is not distributed and resets on restart.
 - **Persistence/retention**: Drawings (strokes) and guesses are stored with finished matches and replay rows; there is no automated retention/privacy deletion job yet.
 - **Replay rendering**: GIF render jobs and funnel events are persisted in PostgreSQL (`render_jobs`, `funnel_events`) by migration `20261123`, with retry counters and stale-lease recovery after a restart. Rendering itself is capped at 3 concurrent jobs per API process and GIF files still live on the API container filesystem.
 - **Admission control**: No load shedding or admission queue; overload can exhaust the API process.
-- **Observability**: Structured logs only; no distributed tracing, metrics, or alerting.
+- **Observability**: Default Nest console logs and a small admin-only `GET /api/metrics` JSON snapshot (process-local counters; see [docs/observability.md](./docs/observability.md)). No Prometheus/OTLP exporter, distributed tracing, request ids, or alerting; there is no dedicated `/health` endpoint.
 - **Deployment/rollback**: Compose is suitable for a single host. `scripts/rollback-check.sh` documents the rollback procedure; automated image/DB snapshot rollback must be wired per environment.
 
 ## Features (implemented)
@@ -151,8 +153,10 @@ post-deploy smoke check.
 JWT_SECRET=$(openssl rand -hex 32) docker compose up --build
 ```
 
-- API on `:3001`, Web on `:3002`, PostgreSQL on `:5440`, Redis on `:6379`
-- The API container runs `prisma migrate deploy` before starting
+- API on `:3001`, Web on `:3002`, PostgreSQL on `:5440`, Redis on `:6390`
+- PostgreSQL and Redis host ports bind to `127.0.0.1` by default; only publish them on a trusted network (e.g. `0.0.0.0:5440:5432`) because they ship with default/no credentials
+- Compose health checks probe all four services (`/api/flags` for API, `/` for web); the API/web checks are liveness only, not `/health`
+- The API container runs `prisma migrate deploy`, seeds the catalogue only if the `words` table is empty, then starts the server
 
 ## Architecture decisions
 

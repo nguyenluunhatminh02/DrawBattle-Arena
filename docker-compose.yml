@@ -8,7 +8,9 @@ services:
       POSTGRES_PASSWORD: drawbattle
       POSTGRES_DB: drawbattle
     ports:
-      - '5440:5432'
+      # Default credentials: bind to loopback only. Override the host address
+      # (e.g. 0.0.0.0:5440:5432) only on a trusted, firewalled network.
+      - '127.0.0.1:5440:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,8 +24,9 @@ services:
     container_name: drawbattle-redis
     restart: unless-stopped
     ports:
-      # Host port 6380 is taken by other services on some hosts; use a distinct port.
-      - '6390:6379'
+      # Host port 6380 is taken by other services on some hosts; use a distinct
+      # port. Redis has no password by default, so keep the bind on loopback.
+      - '127.0.0.1:6390:6379'
     volumes:
       - redisdata:/data
     healthcheck:
@@ -62,6 +65,19 @@ services:
       - '3001:3001'
     volumes:
       - media_data:/app/apps/api/public
+    healthcheck:
+      # /api/flags is an unauthenticated GET; it confirms the HTTP process
+      # answers, not that Prisma/Redis are healthy. Node 20 has global fetch;
+      # the API image (Debian slim) has no wget/curl.
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3001/api/flags')
+          .then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   web:
     build:
@@ -74,13 +90,22 @@ services:
     container_name: drawbattle-web
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
       INTERNAL_API_URL: http://api:3001
       PORT: 3002
     ports:
       - '3002:3002'
+    healthcheck:
+      # Liveness only: Next.js serves the landing page even if its API proxy
+      # target is down.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3002/ || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   pgdata:
