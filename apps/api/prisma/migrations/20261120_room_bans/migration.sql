@@ -1,7 +1,7 @@
 -- Durable per-room kick bans. DB is authoritative: bans survive restarts and
 -- cannot be bypassed by changing sockets, sessions or node processes.
 CREATE TABLE "room_bans" (
-    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
+    "id" UUID NOT NULL,
     "room_id" TEXT NOT NULL,
     "user_id" TEXT,
     "guest_session_id" TEXT,
@@ -9,13 +9,13 @@ CREATE TABLE "room_bans" (
     CONSTRAINT "room_bans_pkey" PRIMARY KEY ("id")
 );
 
--- Full compound uniques match Prisma's @@unique clauses and are valid
--- ON CONFLICT arbiters for `upsert`. PostgreSQL treats NULLs as distinct,
--- so rows with a NULL identity still do not collide with each other.
+-- Partial unique indexes: NULL identities must never collide with each other.
 CREATE UNIQUE INDEX "room_bans_room_id_user_id_key"
-    ON "room_bans"("room_id", "user_id");
+    ON "room_bans"("room_id", "user_id")
+    WHERE "user_id" IS NOT NULL;
 CREATE UNIQUE INDEX "room_bans_room_id_guest_session_id_key"
-    ON "room_bans"("room_id", "guest_session_id");
+    ON "room_bans"("room_id", "guest_session_id")
+    WHERE "guest_session_id" IS NOT NULL;
 CREATE INDEX "room_bans_room_id_created_at_idx"
     ON "room_bans"("room_id", "created_at");
 
