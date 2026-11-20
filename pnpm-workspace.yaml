@@ -2,13 +2,8 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
-overrides:
-  # @nestjs/platform-express 10.x pins multer 2.0.2; force the patched line
-  # without a framework major upgrade. multer 2.x keeps the same API.
-  multer: 2.5.0
-  # @mapbox/node-pre-gyp (via bcrypt) pulls tar <=7.5.18 (GHSA-23hp-3jrh-7fpw).
-  tar: 7.5.19
-
+# Overrides live in package.json: pnpm 9 (used by CI) only reads pnpm.overrides
+# there. Keeping a duplicate block here would be ignored and misleading.
 onlyBuiltDependencies:
   - '@prisma/client'
   - '@prisma/engines'
