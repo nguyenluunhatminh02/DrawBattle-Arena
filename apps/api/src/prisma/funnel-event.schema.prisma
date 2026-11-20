@@ -1,0 +1,13 @@
+/// Optional durable funnel event log. Migration is intentionally NOT included
+/// here: apply the SQL described in the ARCH-06 notes before relying on it.
+model FunnelEvent {
+  id        String   @id @default(cuid())
+  event     String   @map("event")
+  sessionId String   @map("session_id")
+  data      Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([event, createdAt])
+  @@map("funnel_events")
+}

@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { ReplayWorker } from './replay.worker';
+import { ReplayJobService } from './replay-jobs';
 
 @Injectable()
 export class ReplayService {
@@ -8,7 +8,7 @@ export class ReplayService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly worker: ReplayWorker,
+    private readonly jobs: ReplayJobService,
   ) {}
 
   async getReplay(replayId: string) {
@@ -23,20 +23,23 @@ export class ReplayService {
     return replay;
   }
 
-  async queueRender(replayId: string): Promise<{ jobId: string; status: string }> {
-    const replay = await this.prisma.replay.findUnique({ where: { id: replayId } });
-    if (!replay) throw new NotFoundException('Replay not found');
+  async queueRender(replayId: string) {
+    return this.jobs.queueReplay(replayId);
+  }
 
-    if (replay.gifUrl) {
-      return { jobId: replayId, status: 'already_rendered' };
-    }
+  async getJobStatus(jobId: string) {
+    return this.jobs.getStatus(jobId);
+  }
 
-    const jobId = await this.worker.queueRender(
-      replayId,
-      replay.strokes as any[],
-      replay.durationMs,
-    );
-    return { jobId, status: 'queued' };
+  async getRenderStatus(replayId: string) {
+    return this.jobs.getStatusByReplay(replayId);
+  }
+
+  async getGif(replayId: string) {
+    const replay = await this.getReplay(replayId);
+    const job = await this.jobs.getJobByReplay(replayId);
+    const gifUrl = this.jobs.assertRendered(replay, job);
+    return gifUrl;
   }
 
   async updateGifUrl(replayId: string, gifUrl: string) {
@@ -49,7 +52,11 @@ export class ReplayService {
   async getStats() {
     const total = await this.prisma.replay.count();
     const rendered = await this.prisma.replay.count({ where: { gifUrl: { not: null } } });
-    const pending = total - rendered;
-    return { total, rendered, pending };
+    return {
+      total,
+      rendered,
+      pending: await this.jobs.pendingCount(),
+      unrendered: total - rendered,
+    };
   }
 }

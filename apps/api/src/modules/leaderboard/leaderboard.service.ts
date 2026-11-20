@@ -38,13 +38,16 @@ export class LeaderboardService implements OnModuleInit {
       startDate.setDate(startDate.getDate() - 7);
     }
 
+    // The all-time board must not silently truncate to the most recent 2000
+    // matches: that would exclude veteran players. Daily/weekly windows stay
+    // capped to keep the hourly job bounded.
     const matches = await this.prisma.match.findMany({
       where: {
         status: 'FINISHED',
         ...(startDate ? { endedAt: { gte: startDate } } : {}),
       },
       orderBy: { endedAt: 'desc' },
-      take: 2000,
+      ...(startDate ? { take: 2000 } : {}),
       include: {
         scores: {
           include: { player: { include: { user: { select: { id: true, nickname: true } } } } },
@@ -101,7 +104,7 @@ export class LeaderboardService implements OnModuleInit {
   async getLeaderboard(period: 'daily' | 'weekly' | 'alltime' = 'alltime') {
     let snapshots = await this.prisma.leaderboardSnapshot.findMany({
       where: { period },
-      orderBy: { rank: 'asc' },
+      orderBy: [{ rank: 'asc' }, { id: 'asc' }],
       take: 100,
     });
 
