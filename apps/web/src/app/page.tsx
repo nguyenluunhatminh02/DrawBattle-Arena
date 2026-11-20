@@ -49,6 +49,8 @@ export default function HomePage() {
   const [settings, setSettings] = useState<RoomSettingsForm>(DEFAULT_SETTINGS);
   const setPlayer = useGameStore(s => s.setPlayer);
   const storedPlayer = useGameStore(s => s.player);
+  const authToken = useGameStore(s => s.token);
+  const user = useGameStore(s => s.user);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -65,6 +67,15 @@ export default function HomePage() {
   }, [storedPlayer]);
 
   async function ensureSession(name: string) {
+    // A logged-in user must create rooms with their verified JWT, otherwise
+    // the REST room host and the socket identity diverge.
+    if (authToken) {
+      return {
+        token: authToken,
+        playerId: user?.id ?? '',
+        nickname: user?.nickname ?? name,
+      };
+    }
     if (storedPlayer && storedPlayer.nickname === name && storedPlayer.token) return storedPlayer;
     const session = await api.createGuest(name);
     const p = { token: session.token, playerId: session.playerId, nickname: name };

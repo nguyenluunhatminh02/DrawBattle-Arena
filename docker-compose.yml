@@ -36,6 +36,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      network: host
     container_name: drawbattle-api
     restart: unless-stopped
     depends_on:
@@ -63,6 +64,7 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      network: host
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
         INTERNAL_API_URL: http://api:3001
