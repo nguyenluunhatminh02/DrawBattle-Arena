@@ -94,6 +94,7 @@ export default function ChallengeCreatePage() {
           width: s.width,
         })),
         timeLimit * 1000,
+        player?.token,
       );
       setShareUrl(`${window.location.origin}/challenge/${challengeId}`);
     } catch {

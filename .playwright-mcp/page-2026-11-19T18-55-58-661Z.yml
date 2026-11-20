@@ -1,0 +1,45 @@
+- generic [active] [ref=f3e1]:
+  - alert [ref=f3e42]
+  - generic [ref=f3e43]:
+    - banner [ref=f3e44]:
+      - generic [ref=f3e45]:
+        - heading "DrawBattle" [level=1] [ref=f3e46]
+        - generic [ref=f3e47]: 2SCWAF
+        - generic [ref=f3e48]: ● online
+      - button "Copy Link" [ref=f3e50] [cursor=pointer]
+    - generic [ref=f3e51]:
+      - generic [ref=f3e55]:
+        - heading "Phòng chờ" [level=2] [ref=f3e56]
+        - generic [ref=f3e57]:
+          - paragraph [ref=f3e58]: Quét để mời bạn bè
+          - paragraph [ref=f3e60]: "Mã: 2SCWAF"
+        - generic [ref=f3e62]:
+          - generic [ref=f3e63]: TestPlayer (bạn)
+          - generic [ref=f3e64]: Host
+        - generic [ref=f3e66]:
+          - generic [ref=f3e67]:
+            - generic [ref=f3e68]: Số vòng
+            - combobox [ref=f3e69]:
+              - option "1"
+              - option "2" [selected]
+              - option "3"
+          - generic [ref=f3e70]:
+            - generic [ref=f3e71]: Thời gian vẽ
+            - combobox [ref=f3e72]:
+              - option "45s"
+              - option "60s" [selected]
+              - option "90s"
+          - generic [ref=f3e73]:
+            - generic [ref=f3e74]: Gợi ý (hints)
+            - button [ref=f3e75] [cursor=pointer]
+        - button "Bắt đầu (1/8)" [disabled]
+      - generic [ref=f3e77]:
+        - heading "Bảng điểm" [level=3] [ref=f3e79]
+        - generic [ref=f3e81]:
+          - generic [ref=f3e82]:
+            - generic [ref=f3e83]: "1."
+            - text: TestPlayer
+          - generic [ref=f3e84]: "0"
+        - generic [ref=f3e87]:
+          - textbox "Chat..." [ref=f3e88]
+          - button "Gửi" [disabled]

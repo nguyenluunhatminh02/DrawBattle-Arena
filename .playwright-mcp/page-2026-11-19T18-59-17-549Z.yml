@@ -1,0 +1,40 @@
+- generic [ref=f2e1]:
+  - alert [ref=f2e39]
+  - generic [ref=f2e40]:
+    - banner [ref=f2e41]:
+      - generic [ref=f2e42]:
+        - heading "DrawBattle" [level=1] [ref=f2e43]
+        - generic [ref=f2e44]: 2SCWAF
+        - generic [ref=f2e45]: ● online
+      - button "Copy Link" [ref=f2e47] [cursor=pointer]
+    - generic [ref=f2e48]:
+      - generic [ref=f2e52]:
+        - heading "Phòng chờ" [level=2] [ref=f2e53]
+        - generic [ref=f2e54]:
+          - paragraph [ref=f2e55]: Quét để mời bạn bè
+          - paragraph [ref=f2e57]: "Mã: 2SCWAF"
+        - generic [ref=f2e58]:
+          - generic [ref=f2e59]:
+            - generic [ref=f2e60]: TestPlayer
+            - generic [ref=f2e61]: Host
+          - generic [ref=f2e63]:
+            - generic [ref=f2e64]: FriendPlayer (bạn)
+            - generic [ref=f2e83]: ready
+        - button "Bỏ sẵn sàng" [active] [ref=f2e85] [cursor=pointer]
+        - paragraph [ref=f2e66]: Đang chờ host bắt đầu...
+      - generic [ref=f2e67]:
+        - heading "Bảng điểm" [level=3] [ref=f2e69]
+        - generic [ref=f2e70]:
+          - generic [ref=f2e71]:
+            - generic [ref=f2e72]:
+              - generic [ref=f2e73]: "1."
+              - text: TestPlayer
+            - generic [ref=f2e74]: "0"
+          - generic [ref=f2e75]:
+            - generic [ref=f2e76]:
+              - generic [ref=f2e77]: "2."
+              - text: FriendPlayer
+            - generic [ref=f2e78]: "0"
+        - generic [ref=f2e81]:
+          - textbox "Chat..." [ref=f2e82]
+          - button "Gửi" [disabled]

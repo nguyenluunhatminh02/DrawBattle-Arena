@@ -1,0 +1,8 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e2]
+  - main [ref=e3]:
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: Please log in with an admin account to access this page.
+      - link [ref=e7] [cursor=pointer]:
+        - /url: /
+        - button "← Home" [ref=e8]

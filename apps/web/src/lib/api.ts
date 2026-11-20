@@ -84,9 +84,11 @@ export const api = {
     challengeId: string,
     strokes: Array<{ strokeId: string; points: Array<{ x: number; y: number }>; color: string; width: number }>,
     durationMs: number,
+    token?: string,
   ) {
     return request<{ ok: boolean }>(`/challenges/${challengeId}/finalize`, {
       method: 'POST',
+      headers: token ? authed(token) : undefined,
       body: JSON.stringify({ strokes, durationMs }),
     });
   },

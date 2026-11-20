@@ -394,7 +394,7 @@ export class GameSocketGateway
   }
 
   @SubscribeMessage('guess:submit')
-  onGuessSubmit(
+  async onGuessSubmit(
     @ConnectedSocket() socket: AuthedSocket,
     @MessageBody() guess: string,
   ) {
@@ -412,6 +412,25 @@ export class GameSocketGateway
     if (!this.checkSocketRateLimit(socket, 'guess', 5, 2000)) return;
     const result = this.game.submitGuess(roomId, playerId, guess);
     if (!result.accepted) return;
+    
+    // Persist guess to DB
+    try {
+      const turn = this.game.getTurnSnapshot(roomId);
+      if (turn) {
+        await this.prisma.guess.create({
+          data: {
+            turnId: turn.id,
+            playerId,
+            guessText: guess,
+            normalizedText: guess.toLowerCase().trim(),
+            correct: result.correct,
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.error('Failed to persist guess', err instanceof Error ? err.message : String(err));
+    }
+    
     if (!result.correct) {
       socket.emit('guess:wrong');
     }
