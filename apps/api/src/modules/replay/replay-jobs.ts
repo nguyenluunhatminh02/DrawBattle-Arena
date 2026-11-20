@@ -8,6 +8,9 @@ export type RenderState = (typeof RENDER_STATES)[number];
 export const RUNNING_LEASE_MS = 5 * 60 * 1000;
 export const MAX_RENDER_ATTEMPTS = 3;
 
+/** Number of queued/stale candidates examined per claim attempt. */
+export const CLAIM_CANDIDATE_LIMIT = 5;
+
 /** Retry backoff: 30s, 2m, 10m. The index is the number of completed attempts. */
 const BACKOFF_SCHEDULE_MS = [30_000, 2 * 60_000, 10 * 60_000];
 
@@ -102,8 +105,9 @@ interface JobStore {
   create(replayId: string, now: Date): Promise<RenderJobRecord>;
   claimNext(holder: string, now: Date): Promise<RenderJobRecord | null>;
   markRunning(jobId: string, holder: string, now: Date): Promise<RenderJobRecord | null>;
-  succeed(jobId: string, now: Date): Promise<RenderJobRecord | null>;
-  fail(jobId: string, error: string, now: Date): Promise<RenderJobRecord | null>;
+  /** `holder` is the fencing token from the successful claim: only the current lock owner may finish it. */
+  succeed(jobId: string, holder: string, now: Date): Promise<RenderJobRecord | null>;
+  fail(jobId: string, holder: string, error: string, now: Date): Promise<RenderJobRecord | null>;
   retryNow(jobId: string, now: Date): Promise<RenderJobRecord | null>;
   pendingCount(): Promise<number>;
 }
@@ -177,9 +181,9 @@ export class InMemoryJobStore implements JobStore {
     return updated;
   }
 
-  async succeed(jobId: string, now: Date) {
+  async succeed(jobId: string, holder: string, now: Date) {
     const job = this.jobs.get(jobId);
-    if (!job || job.state !== 'running') return null;
+    if (!job || job.state !== 'running' || job.lockedBy !== holder) return null;
     const updated: RenderJobRecord = {
       ...job,
       state: 'completed',
@@ -193,9 +197,9 @@ export class InMemoryJobStore implements JobStore {
     return updated;
   }
 
-  async fail(jobId: string, error: string, now: Date) {
+  async fail(jobId: string, holder: string, error: string, now: Date) {
     const job = this.jobs.get(jobId);
-    if (!job || job.state !== 'running') return null;
+    if (!job || job.state !== 'running' || job.lockedBy !== holder) return null;
     const updated: RenderJobRecord = { ...job, ...failureTransition(job, error, now), updatedAt: now };
     this.jobs.set(jobId, updated);
     return updated;
@@ -291,48 +295,49 @@ export class PrismaJobStore implements JobStore {
    * Atomic compare-and-set. The WHERE clause makes two workers racing for the
    * same job impossible: at most one UPDATE matches, regardless of process.
    */
-  private async claimWhere(where: Record<string, unknown>, holder: string, now: Date) {
+  private async claimWhere(
+    where: Record<string, unknown> & { id: string },
+    holder: string,
+    now: Date,
+  ) {
     const claimed = await this.prisma.renderJob.updateMany({
       where: where as never,
       data: { state: 'running', lockedBy: holder, lockedAt: now, updatedAt: now },
     });
     if (claimed.count === 0) return null;
-    // Only one job can carry this exact lease timestamp for this holder.
-    const row = await this.prisma.renderJob.findFirst({ where: { lockedBy: holder, lockedAt: now } });
+    // Read by primary key. A findFirst on lease fields could return a different
+    // job when two claims share the same holder and millisecond timestamp.
+    const row = await this.prisma.renderJob.findUnique({ where: { id: where.id } });
     return row ? normalize(row) : null;
   }
 
   async claimNext(holder: string, now: Date) {
     const staleCutoff = new Date(now.getTime() - RUNNING_LEASE_MS);
-    // Claim exactly one job. The guarded UPDATE matches at most one row; using
-    // updateMany with a broad OR condition previously marked unrelated jobs as
-    // running even though no worker received them.
+    const where = {
+      OR: [
+        { state: 'queued' as const, nextAttemptAt: { lte: now } },
+        { state: 'running' as const, lockedAt: { not: null, lte: staleCutoff } },
+      ],
+    };
+    // Read several candidates: another worker may win the CAS on the first one,
+    // in which case we still try the next queued/stale job. Each guarded UPDATE
+    // matches at most one row, so a worker still claims exactly one job.
     const candidates = await this.prisma.renderJob.findMany({
-      where: {
-        OR: [
-          { state: 'queued', nextAttemptAt: { lte: now } },
-          { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
-        ],
-      },
+      where,
       orderBy: { nextAttemptAt: 'asc' },
-      take: 1,
+      take: CLAIM_CANDIDATE_LIMIT,
     });
-    const candidate = candidates[0];
-    if (!candidate) return null;
 
-    const claimed = await this.prisma.renderJob.updateMany({
-      where: {
-        id: candidate.id,
-        OR: [
-          { state: 'queued', nextAttemptAt: { lte: now } },
-          { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
-        ],
-      },
-      data: { state: 'running', lockedBy: holder, lockedAt: now, updatedAt: now },
-    });
-    if (claimed.count === 0) return null;
-    const row = await this.prisma.renderJob.findUnique({ where: { id: candidate.id } });
-    return row && row.lockedBy === holder ? normalize(row) : null;
+    for (const candidate of candidates) {
+      const claimed = await this.prisma.renderJob.updateMany({
+        where: { id: candidate.id, ...where },
+        data: { state: 'running', lockedBy: holder, lockedAt: now, updatedAt: now },
+      });
+      if (claimed.count === 0) continue;
+      const row = await this.prisma.renderJob.findUnique({ where: { id: candidate.id } });
+      if (row && row.lockedBy === holder) return normalize(row);
+    }
+    return null;
   }
 
   async markRunning(jobId: string, holder: string, now: Date) {
@@ -350,9 +355,9 @@ export class PrismaJobStore implements JobStore {
     );
   }
 
-  async succeed(jobId: string, now: Date) {
+  async succeed(jobId: string, holder: string, now: Date) {
     const updated = await this.prisma.renderJob.updateMany({
-      where: { id: jobId, state: 'running' },
+      where: { id: jobId, state: 'running', lockedBy: holder },
       data: {
         state: 'completed',
         error: null,
@@ -365,12 +370,12 @@ export class PrismaJobStore implements JobStore {
     return updated.count > 0 ? this.findById(jobId) : null;
   }
 
-  async fail(jobId: string, error: string, now: Date) {
+  async fail(jobId: string, holder: string, error: string, now: Date) {
     const job = await this.findById(jobId);
-    if (!job || job.state !== 'running') return null;
+    if (!job || job.state !== 'running' || job.lockedBy !== holder) return null;
     const transition = failureTransition(job, error, now);
     const updated = await this.prisma.renderJob.updateMany({
-      where: { id: jobId, state: 'running', lockedBy: job.lockedBy },
+      where: { id: jobId, state: 'running', lockedBy: holder },
       data: { ...transition, updatedAt: now },
     });
     return updated.count > 0 ? this.findById(jobId) : null;
@@ -466,11 +471,11 @@ export class ReplayJobService {
   }
 
   async succeed(jobId: string) {
-    return this.store.succeed(jobId, new Date());
+    return this.store.succeed(jobId, this.holder, new Date());
   }
 
   async fail(jobId: string, error: string) {
-    const job = await this.store.fail(jobId, error, new Date());
+    const job = await this.store.fail(jobId, this.holder, error, new Date());
     if (job?.state === 'failed') {
       this.logger.error(`Render job ${jobId} exhausted ${job.attempts} attempts: ${error}`);
     }
