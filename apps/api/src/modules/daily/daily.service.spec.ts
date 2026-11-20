@@ -1,6 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
 import { DailyService, getVietnamToday } from './daily.service';
 
+// Jest in this repo does not transform @nestjs/schedule's ESM build; the
+// decorator is irrelevant to these pure service tests.
+jest.mock('@nestjs/schedule', () => ({ Cron: () => () => undefined }));
+
 describe('getVietnamToday (DAILY-06)', () => {
   it('uses the UTC+7 calendar date, not the host timezone', () => {
     // 2026-06-15 17:30Z is already 2026-06-16 in Ho Chi Minh City.
@@ -43,7 +47,7 @@ function createPrismaMock() {
       create: jest.fn().mockResolvedValue({}),
       update: jest.fn().mockResolvedValue({}),
     },
-    $transaction: jest.fn().mockImplementation(async (cb: (tx: unknown) => unknown) => cb(tx)),
+    $transaction: jest.fn().mockImplementation(async (cb: (t: unknown) => unknown) => cb({})),
     $executeRaw: jest.fn().mockResolvedValue(0),
   };
 }

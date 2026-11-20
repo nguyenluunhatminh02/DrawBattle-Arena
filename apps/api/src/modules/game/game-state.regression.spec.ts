@@ -159,7 +159,7 @@ describe('GameStateService regressions', () => {
 
   // TEST-13: reconnect preserves identity instead of creating a duplicate player.
   it('TEST-13 reconnecting a full room reuses the existing player row', () => {
-    setup('r-reconnect', { maxPlayers: 2 }, ['host', 'guest', 'intruder']);
+    setup('r-reconnect', { maxPlayers: 2 }, ['host', 'guest']);
     service.setPlayerOnline('r-reconnect', 'guest', false);
     expect(service.addPlayer('r-reconnect', 'third', 'Third')).toBeNull();
     const reconnected = service.addPlayer('r-reconnect', 'guest', 'Guest');

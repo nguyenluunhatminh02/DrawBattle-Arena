@@ -24,7 +24,7 @@ function createPrismaMock(overrides: Record<string, unknown> = {}) {
     },
     word: { findUnique: jest.fn().mockResolvedValue({ canonical: 'mèo' }) },
     replay: { create: jest.fn().mockResolvedValue({ id: 'r1' }) },
-    $transaction: jest.fn().mockImplementation(async (cb: (tx: unknown) => unknown) => cb(tx)),
+    $transaction: jest.fn().mockImplementation(async (cb: (t: unknown) => unknown) => cb({})),
     $executeRaw: jest.fn().mockResolvedValue(0),
     ...overrides,
   };

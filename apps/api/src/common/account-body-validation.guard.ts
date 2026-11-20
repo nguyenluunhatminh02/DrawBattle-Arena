@@ -16,23 +16,29 @@ import { LoginDto, RegisterDto } from '../modules/auth/dto/account.dto';
  */
 @Injectable()
 export class AccountBodyValidationGuard implements CanActivate {
-  private readonly dtoByRoute: Record<string, new () => object> = {
-    '/api/account/login': LoginDto,
-    '/api/account/register': RegisterDto,
-  };
-
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') return true;
     const request = context.switchToHttp().getRequest<{
       method?: string;
-      originalUrl?: string;
-      route?: { path?: string };
       body?: unknown;
     }>();
     if (request.method !== 'POST') return true;
 
-    const path = request.originalUrl?.split('?')[0] ?? '';
-    const dtoClass = this.dtoByRoute[path];
+    // Select the DTO from the actual handler/controller metadata. String
+    // matching request URLs can be bypassed by alternate spellings and does
+    // not fail closed when the router normalizes a path differently.
+    const controller = context.getClass();
+    const handler = context.getHandler();
+    const controllerName = controller?.name ?? '';
+    const handlerName = handler?.name ?? '';
+    if (controllerName !== 'AccountController') return true;
+
+    const dtoClass =
+      handlerName === 'login'
+        ? LoginDto
+        : handlerName === 'register'
+          ? RegisterDto
+          : null;
     if (!dtoClass) return true;
 
     const instance = plainToInstance(dtoClass, request.body ?? {});
