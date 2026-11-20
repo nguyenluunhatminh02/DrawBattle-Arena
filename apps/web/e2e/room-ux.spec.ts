@@ -30,7 +30,7 @@ async function createRoom(page: Page): Promise<string> {
 
 async function joinRoom(page: Page, code: string) {
   await page.getByPlaceholder('Mã phòng').fill(code);
-  await page.locator('button', { hasText: 'Vào' }).click();
+  await page.getByRole('button', { name: /^Vào/ }).first().click();
   await page.waitForURL(/\/room\//, { timeout: 15000 });
   await page.waitForFunction(
     () => document.body.innerText.includes('Phòng chờ'),
@@ -62,8 +62,9 @@ test.describe('QR Direct Join', () => {
     );
     const text = await visitor.evaluate(() => document.body.innerText);
     expect(text).toContain('QrHost');
-    expect(text).toContain('Player_');
-    expect(text).toContain('Sẵn sàng');
+    // QR auto-join seeds a guest identity with a Player_#### nickname.
+    expect(text).toMatch(/Player_\d{4}/);
+    await expect(visitor.getByRole('button', { name: 'Sẵn sàng', exact: true })).toBeVisible();
 
     await hostCtx.close();
     await visitorCtx.close();
@@ -93,12 +94,12 @@ test.describe('Mobile UI', () => {
     );
     expect(overflow).toBeLessThanOrEqual(1);
 
-    const startBtn = host.locator('button', { hasText: 'Bắt đầu' });
+    const startBtn = host.getByRole('button', { name: /^Bắt đầu/ });
     await expect(startBtn).toBeDisabled();
-    await guest.locator('button', { hasText: 'Sẵn sàng' }).click();
+    await guest.getByRole('button', { name: 'Sẵn sàng', exact: true }).click();
     await expect(startBtn).toBeEnabled({ timeout: 10000 });
 
-    await expect(host.locator('button', { hasText: 'Thoát' })).toBeVisible();
+    await expect(host.getByRole('button', { name: 'Thoát', exact: true })).toBeVisible();
 
     const guestOverflow = await guest.evaluate(
       () => document.documentElement.scrollWidth - window.innerWidth,

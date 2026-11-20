@@ -22,7 +22,8 @@ services:
     container_name: drawbattle-redis
     restart: unless-stopped
     ports:
-      - '6380:6379'
+      # Host port 6380 is taken by other services on some hosts; use a distinct port.
+      - '6390:6379'
     volumes:
       - redisdata:/data
     healthcheck:
@@ -48,7 +49,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET environment variable is required - generate with openssl rand -hex 32}
       JWT_EXPIRES_IN: 7d
       PORT: 3001
-      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3002}
+      # Production-safe placeholder (no localhost fallback); override with the
+      # public site URL for staging/development, e.g. CORS_ORIGIN=http://localhost:3002.
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://drawbattle.caphesuachua.blog}
       TRUST_PROXY: ${TRUST_PROXY:-1}
       NODE_ENV: production
     ports:

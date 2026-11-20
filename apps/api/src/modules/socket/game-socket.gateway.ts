@@ -227,7 +227,8 @@ export class GameSocketGateway
       socket.data.playerId = joined.playerId;
       socket.data.roomId = joined.roomId;
       socket.data.roomCode = roomCode;
-      socket.join(joined.roomId);
+      // Do not join the socket room until capacity is confirmed: on ROOM_FULL
+      // the socket must not be an active room member.
       const existingTimer = this.disconnectTimers.get(joined.playerId);
       if (existingTimer) {
         clearTimeout(existingTimer);
@@ -263,10 +264,26 @@ export class GameSocketGateway
       }
       const joinedPlayer = this.game.addPlayer(joined.roomId, joined.playerId, nickname);
       if (!joinedPlayer) {
+        // addPlayer returned null because the in-memory room is at capacity.
+        // joinRoom already persisted a DB row (or reactivated a soft-deleted
+        // one), so release that slot before reporting ROOM_FULL; otherwise the
+        // abandoned row keeps the room full forever.
+        try {
+          await this.roomService.leaveRoom(joined.roomId, joined.playerId);
+        } catch (err) {
+          this.logger.error(
+            'Failed to roll back full-room join',
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+        socket.data.playerId = undefined;
+        socket.data.roomId = undefined;
+        socket.data.roomCode = undefined;
         socket.emit('error', 'ROOM_FULL', 'Room is full');
         return;
       }
 
+      socket.join(joined.roomId);
       this.game.registerSink(joined.roomId, (event: RoomEvent) => {
         this.dispatchRoomEvent(joined.roomId, event);
       });
@@ -558,34 +575,30 @@ export class GameSocketGateway
     switch (data.action) {
       case 'kick': {
         const targetSocket = this.roomSockets.get(roomId)?.get(data.targetId);
-        // Resolve identity before removal: offline targets have no socket, and
-        // without a persisted ban they could rejoin with a fresh session.
-        let targetSessionId: string | undefined = targetSocket?.data.sessionId;
-        let targetUserId: string | undefined = targetSocket?.data.userId;
-        if (!targetSessionId && !targetUserId) {
-          try {
-            const dbRoom = await this.roomService.getRoomById(roomId);
-            const targetPlayer = dbRoom.players.find(p => p.id === data.targetId);
-            targetSessionId = targetPlayer?.guestSessionId ?? undefined;
-            targetUserId = targetPlayer?.userId ?? undefined;
-          } catch (err) {
-            this.logger.error(
-              'Failed to resolve kicked player identity',
-              err instanceof Error ? err.message : String(err),
-            );
-          }
+        // Persist the ban before removal: resolve identities from the DB, not
+        // the socket, so offline targets and token rotation cannot evade it.
+        // Never remove the player first - a failed DB write would fail open.
+        let banned: { userId: string | null; guestSessionId: string | null };
+        try {
+          banned = await this.roomService.banPlayer(roomId, data.targetId);
+        } catch (err) {
+          this.logger.error(
+            'Failed to persist kick ban',
+            err instanceof Error ? err.message : String(err),
+          );
+          socket.emit('error', 'KICK_FAILED', 'Failed to persist kick');
+          break;
         }
         if (!this.game.kickPlayer(roomId, playerId, data.targetId)) {
           socket.emit('error', 'KICK_FAILED', 'Cannot kick player');
           break;
         }
-        // Key the denylist by roomId so a kick does not ban the identity from
-        // an unrelated room that happens to reuse the same code.
-        if (targetSessionId || targetUserId) {
-          const banned = this.kickedSessions.get(roomId) ?? new Set<string>();
-          if (targetSessionId) banned.add(targetSessionId);
-          if (targetUserId) banned.add(targetUserId);
-          this.kickedSessions.set(roomId, banned);
+        // Best-effort fast path only; joinRoom checks the DB authoritatively.
+        const denylist = this.kickedSessions.get(roomId) ?? new Set<string>();
+        if (banned.guestSessionId) denylist.add(banned.guestSessionId);
+        if (banned.userId) denylist.add(banned.userId);
+        if (banned.guestSessionId || banned.userId) {
+          this.kickedSessions.set(roomId, denylist);
         }
         const timer = this.disconnectTimers.get(data.targetId);
         if (timer) {

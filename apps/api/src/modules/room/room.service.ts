@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -142,6 +143,22 @@ export class RoomService {
         throw new BadRequestException('Room expired');
       }
 
+      // DB is authoritative for kicks: a banned identity must never be able to
+      // create or reactivate a RoomPlayer, including after restarts or when a
+      // different API process handles the join.
+      const identities: Prisma.RoomBanWhereInput[] = [];
+      if (userId) identities.push({ userId });
+      if (guestSessionId) identities.push({ guestSessionId });
+      if (
+        identities.length > 0 &&
+        (await tx.roomBan.findFirst({
+          where: { roomId: room.id, OR: identities },
+          select: { id: true },
+        }))
+      ) {
+        throw new ForbiddenException('You were kicked from this room');
+      }
+
       const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
 
       // A reconnecting player is still subject to the room password. Checking
@@ -228,6 +245,39 @@ export class RoomService {
       where: { id },
       data: { status: 'WAITING' },
     });
+  }
+
+  /**
+   * Persists a kick ban for the target's durable identities. Resolves them from
+   * the RoomPlayer row in the DB, never from socket state, so offline targets
+   * and socket/session rotation cannot evade the ban. Must be called before
+   * the target is removed from the in-memory game state.
+   */
+  async banPlayer(roomId: string, targetRoomPlayerId: string) {
+    const player = await this.prisma.roomPlayer.findFirst({
+      where: { id: targetRoomPlayerId, roomId },
+      select: { userId: true, guestSessionId: true },
+    });
+    if (!player) throw new NotFoundException('Room player not found');
+
+    await this.prisma.$transaction(async tx => {
+      if (player.userId) {
+        await tx.roomBan.upsert({
+          where: { roomId_userId: { roomId, userId: player.userId } },
+          create: { roomId, userId: player.userId },
+          update: {},
+        });
+      }
+      if (player.guestSessionId) {
+        await tx.roomBan.upsert({
+          where: { roomId_guestSessionId: { roomId, guestSessionId: player.guestSessionId } },
+          create: { roomId, guestSessionId: player.guestSessionId },
+          update: {},
+        });
+      }
+    });
+
+    return { userId: player.userId, guestSessionId: player.guestSessionId };
   }
 
   async leaveRoom(roomId: string, playerId: string) {

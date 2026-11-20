@@ -57,7 +57,11 @@ export class ThrottleGuard implements CanActivate {
       this.buckets.set(key, bucket);
     }
 
-    const mult = Math.max(1, parseInt(process.env.THROTTLE_MULT ?? '1', 10) || 1);
+    // parseInt yields NaN for malformed values; `|| 1` hides that but also
+    // silently accepts negatives/fractionals. Clamp to a finite positive
+    // integer so a bad env var can never disable or inflate the rate limit.
+    const parsedMult = Number.parseInt(process.env.THROTTLE_MULT ?? '1', 10);
+    const mult = Number.isFinite(parsedMult) && parsedMult > 0 ? Math.floor(parsedMult) : 1;
     bucket.count++;
     if (bucket.count > config.limit * mult) {
       throw new HttpException('Rate limit exceeded', HttpStatus.TOO_MANY_REQUESTS);

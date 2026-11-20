@@ -94,7 +94,7 @@ test.describe('Live Room Full Flow', () => {
     await readyBtn.waitFor({ state: 'visible', timeout: 10000 });
     await readyBtn.click();
     await host.waitForFunction(
-      () => document.body.innerText.includes('ready'),
+      () => document.body.innerText.includes('Sẵn sàng'),
       null,
       { timeout: 10000 },
     );
@@ -168,21 +168,20 @@ test.describe('Quick Challenge', () => {
     await page.locator('button', { hasText: 'Thách bạn bè' }).click();
     await page.waitForURL(/\/challenge\/create/, { timeout: 15000 });
 
-    await page.locator('button', { hasText: 'Bắt đầu vẽ' }).click();
-    await page.waitForFunction(
-      () => document.body.innerText.includes('Vẽ từ:'),
-      null,
-      { timeout: 10000 },
-    );
+    await page.getByRole('button', { name: 'Bắt đầu vẽ' }).click();
 
-    const word = await page.evaluate(() => {
-      const el = document.querySelector('.font-bold.text-lg');
-      return el?.textContent || '';
-    });
-    expect(word).toBeTruthy();
+    // The redesigned challenge page renders "Vẽ từ" as a label followed by the
+    // word in a live region, with no colon. Wait for the async word to load.
+    const wordEl = page.locator('[aria-live="polite"]').first();
+    await expect(wordEl).toBeVisible({ timeout: 10000 });
+    await expect(wordEl).not.toHaveText('', { timeout: 10000 });
+    const word = await wordEl.textContent();
+    expect(word?.trim()).toBeTruthy();
 
     await page.waitForFunction(
-      () => document.body.innerText.includes('Challenge tạo xong') || document.body.innerText.includes('Gửi link'),
+      () =>
+        document.body.innerText.includes('Tạo thách thức thành công!') ||
+        document.body.innerText.includes('Sao chép liên kết'),
       null,
       { timeout: 40000 },
     );

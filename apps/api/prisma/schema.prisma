@@ -24,6 +24,7 @@ model User {
 
   guestSessions  GuestSession[]
   roomPlayers    RoomPlayer[]
+  roomBans       RoomBan[]
   challenges     Challenge[]        @relation("ChallengeCreator")
   attempts       ChallengeAttempt[] @relation("AttemptSolver")
   streaks        Streak[]
@@ -42,6 +43,7 @@ model GuestSession {
 
   user                 User?                       @relation(fields: [userId], references: [id])
   roomPlayers          RoomPlayer[]
+  roomBans             RoomBan[]
   dailyChallengeAttempts DailyChallengeAttempt[]
 
   @@map("guest_sessions")
@@ -58,6 +60,7 @@ model Room {
   createdAt    DateTime       @default(now()) @map("created_at")
 
   players RoomPlayer[]
+  bans    RoomBan[]
   matches Match[]
 
   @@map("rooms")
@@ -83,6 +86,23 @@ model RoomPlayer {
   @@unique([roomId, guestSessionId])
   @@index([roomId, leftAt])
   @@map("room_players")
+}
+
+model RoomBan {
+  id             String    @id @default(uuid())
+  roomId         String    @map("room_id")
+  userId         String?   @map("user_id")
+  guestSessionId String?   @map("guest_session_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  room    Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user    User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  guest   GuestSession? @relation(fields: [guestSessionId], references: [id], onDelete: SetNull)
+
+  @@unique([roomId, userId])
+  @@unique([roomId, guestSessionId])
+  @@index([roomId, createdAt])
+  @@map("room_bans")
 }
 
 model Match {

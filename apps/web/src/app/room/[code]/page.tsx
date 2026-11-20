@@ -21,7 +21,6 @@ export default function RoomPage() {
   const code = (params.code as string).toUpperCase();
   const player = useGameStore(s => s.player);
   const authToken = useGameStore(s => s.token);
-  const user = useGameStore(s => s.user);
   const room = useGameStore(s => s.room);
   const myPlayerId = useGameStore(s => s.myPlayerId);
   const currentPhase = useGameStore(s => s.currentPhase);
@@ -60,6 +59,12 @@ export default function RoomPage() {
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => setHydrated(true), []);
 
+  // A registered account joins with its verified JWT even when no guest
+  // `player` exists in the persisted store. Anonymous visitors use their
+  // guest session token. Never create a guest player for an authed user.
+  const socketToken = authToken || player?.token || null;
+  const identityReady = !!socketToken && (!player || !!player.nickname);
+
   // Reset QR-join state when navigating to a different room code.
   useEffect(() => {
     autoJoinRef.current = false;
@@ -73,7 +78,7 @@ export default function RoomPage() {
   // manual input. The ref is reset in cleanup so React StrictMode's second
   // mount can retry; the cancelled flag prevents duplicate sessions.
   useEffect(() => {
-    if (!hydrated || player || autoJoinRef.current || roomUnavailable) return;
+    if (!hydrated || socketToken || autoJoinRef.current || roomUnavailable) return;
     autoJoinRef.current = true;
 
     let cancelled = false;
@@ -93,10 +98,6 @@ export default function RoomPage() {
           setNeedPassword(true);
           return;
         }
-
-        // Authenticated users already carry a verified JWT and a persisted
-        // player identity; do not create an orphaned guest session.
-        if (authToken || user) return;
 
         setAutoJoining(true);
         const nickname = `Player_${Math.floor(1000 + Math.random() * 9000)}`;
@@ -122,17 +123,15 @@ export default function RoomPage() {
       // The first async call above is cancelled before it can create a guest.
       autoJoinRef.current = false;
     };
-  }, [hydrated, player, authToken, user, code, roomUnavailable]);
+  }, [hydrated, socketToken, code, roomUnavailable]);
 
   useEffect(() => {
-    if (!hydrated) return;
-    if (!player || !player.nickname || !player.token) return;
+    if (!hydrated || !identityReady || !socketToken) return;
 
-    // A registered account should join with its verified user JWT. Guest
-    // sessions remain the fallback for anonymous players. Never create a
-    // guest identity for an authenticated user — the gateway derives the
-    // authoritative nickname from the verified JWT.
-    const socketToken = authToken || player.token;
+    // The gateway derives identity (and the authoritative nickname) from the
+    // verified handshake token: a user JWT for registered accounts, or a guest
+    // session token for anonymous players. Identity in the UI comes from the
+    // room snapshot's yourPlayerId, never from a persisted guest player.
     const socket = connectSocket(socketToken);
     const store = useGameStore.getState;
 
@@ -167,7 +166,9 @@ export default function RoomPage() {
         settings: snapshot.settings,
         status: snapshot.status,
       });
-      if (snapshot.yourPlayerId) s.setMyPlayerId(snapshot.yourPlayerId);
+      // The snapshot's per-socket yourPlayerId is the authoritative identity
+      // for both guest and registered users.
+      s.setMyPlayerId(snapshot.yourPlayerId ?? null);
       s.setScores(snapshot.players.map(p => ({ playerId: p.id, points: p.score, delta: 0 })));
     });
 
@@ -376,7 +377,7 @@ export default function RoomPage() {
       disconnectSocket();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, player, authToken, code, joinVersion, router]);
+  }, [hydrated, identityReady, socketToken, code, joinVersion, router]);
 
   useEffect(() => {
     if (!turnEndsAt) return;
@@ -432,7 +433,7 @@ export default function RoomPage() {
     );
   }
 
-  if (!player || !player.nickname || !player.token) {
+  if (!identityReady || !socketToken) {
     return (
       <div className="h-[100dvh] flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50">
         <Card className="w-full max-w-sm">
@@ -513,7 +514,7 @@ export default function RoomPage() {
       // A QR scan on a password room has no player yet. Bootstrap a guest
       // identity; the socket effect will join with passwordRef.current.
       // Never create a guest for an authenticated user — they keep their JWT.
-      if (!player && !authToken) {
+      if (!socketToken) {
         const nickname = `Player_${Math.floor(1000 + Math.random() * 9000)}`;
         const session = await api.createGuest(nickname);
         useGameStore.getState().setPlayer({
@@ -523,9 +524,9 @@ export default function RoomPage() {
         });
       }
       setNeedPassword(false);
-      // If player already exists (registered user or previous guest), trigger
+      // If identity already exists (registered user or previous guest), trigger
       // socket rejoin by bumping joinVersion so the effect re-runs.
-      if (player || authToken) {
+      if (socketToken) {
         setJoinVersion(v => v + 1);
       }
     } catch (err) {

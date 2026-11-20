@@ -23,6 +23,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
@@ -66,3 +75,52 @@ jobs:
         env:
           DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
         run: pnpm --filter @drawbattle/api db:seed
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @drawbattle/web exec playwright install --with-deps chromium
+
+      - name: Start API for e2e
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: ci-test-secret-with-at-least-32-chars
+          CORS_ORIGIN: http://localhost:3002
+          PORT: 3001
+        run: |
+          pnpm --filter @drawbattle/api start > /tmp/drawbattle-api.log 2>&1 &
+          echo $! > /tmp/drawbattle-api.pid
+
+      - name: Start Web for e2e
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+          INTERNAL_API_URL: http://localhost:3001
+          PORT: 3002
+        run: |
+          cd apps/web
+          pnpm start > /tmp/drawbattle-web.log 2>&1 &
+          echo $! > /tmp/drawbattle-web.pid
+
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3001/api/flags >/dev/null && curl -sf http://localhost:3002 >/dev/null; then
+              echo "Services ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Services failed to start"
+          cat /tmp/drawbattle-api.log
+          cat /tmp/drawbattle-web.log
+          exit 1
+
+      - name: Playwright e2e tests
+        env:
+          DATABASE_URL: postgresql://drawbattle:drawbattle@localhost:5440/drawbattle?schema=public
+        run: pnpm --filter @drawbattle/web test:e2e
+
+      - name: Stop e2e services
+        if: always()
+        run: |
+          if [ -f /tmp/drawbattle-api.pid ]; then kill $(cat /tmp/drawbattle-api.pid) 2>/dev/null || true; fi
+          if [ -f /tmp/drawbattle-web.pid ]; then kill $(cat /tmp/drawbattle-web.pid) 2>/dev/null || true; fi
