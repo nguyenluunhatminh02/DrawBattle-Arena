@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { v4 as uuid } from 'uuid';
 import {
   calculateDrawerScore,
@@ -22,6 +22,7 @@ import { Prisma } from '@prisma/client';
 import { WordService } from '../word/word.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FeatureFlagService } from '../feature-flag/feature-flag.service';
+import { ReplayJobService } from '../replay/replay-jobs';
 import { censorProfanity } from '../../common/profanity';
 
 interface RoomState {
@@ -124,6 +125,7 @@ export class GameStateService {
     private readonly wordService: WordService,
     private readonly prisma: PrismaService,
     private readonly featureFlags: FeatureFlagService,
+    @Optional() private readonly replayJobs?: ReplayJobService,
   ) {}
 
   registerSink(roomId: string, sink: EventSink) {
@@ -969,11 +971,12 @@ export class GameStateService {
       this.emit(roomId, { type: 'room:snapshot', payload: this.getSnapshot(roomId) });
 
       let persistOk = false;
+      let replayIds: string[] = [];
       try {
         const completed = matchState.completedTurns;
         const turnsPerRound = Math.max(1, matchState.drawerOrder.length);
         const roundCount = Math.max(1, Math.ceil(completed.length / turnsPerRound));
-        await this.prisma.match.create({
+        const savedMatch = await this.prisma.match.create({
           data: {
             id: matchId,
             roomId,
@@ -1018,8 +1021,12 @@ export class GameStateService {
               })),
             },
           },
+          include: { rounds: { include: { turns: { include: { replay: true } } } } },
         });
         persistOk = true;
+        replayIds = savedMatch.rounds.flatMap(round =>
+          round.turns.flatMap(turn => (turn.replay ? [turn.replay.id] : [])),
+        );
         this.logger.log(`Match ${matchId} persisted: ${rankings.length} scores, ${completed.length} replays`);
       } catch (err) {
         this.logger.error(`Failed to persist match ${matchId}`, err instanceof Error ? err.message : String(err));
@@ -1029,6 +1036,20 @@ export class GameStateService {
         type: 'match:finished',
         payload: { matchId, rankings, duration, persisted: persistOk, ...(teamsResult ? { teams: teamsResult } : {}) },
       });
+
+      // Only enqueue replays that were actually persisted. queueReplay is
+      // idempotent (existing jobs are returned unchanged), so these fire-and-
+      // forget calls cannot duplicate renders; the worker alone claims jobs.
+      if (persistOk && this.replayJobs) {
+        for (const replayId of replayIds) {
+          void this.replayJobs.queueReplay(replayId).catch(err => {
+            this.logger.error(
+              `Failed to queue replay ${replayId} for match ${matchId}`,
+              err instanceof Error ? err.message : String(err),
+            );
+          });
+        }
+      }
 
       void this.prisma.room
         .update({ where: { id: roomId }, data: { status: 'WAITING' } })

@@ -4,9 +4,10 @@ import { RoomModule } from '../room/room.module';
 import { WordModule } from '../word/word.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { FeatureFlagModule } from '../feature-flag/feature-flag.module';
+import { ReplayModule } from '../replay/replay.module';
 
 @Module({
-  imports: [RoomModule, WordModule, PrismaModule, FeatureFlagModule],
+  imports: [RoomModule, WordModule, PrismaModule, FeatureFlagModule, ReplayModule],
   providers: [GameStateService],
   exports: [GameStateService],
 })

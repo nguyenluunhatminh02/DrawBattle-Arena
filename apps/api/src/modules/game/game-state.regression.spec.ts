@@ -71,7 +71,7 @@ describe('GameStateService regressions', () => {
   };
 
   beforeEach(() => {
-    service = new GameStateService({} as never, {} as never, {} as never);
+    service = new GameStateService({} as never, {} as never, {} as never, {} as never);
     events = [];
   });
 

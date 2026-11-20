@@ -308,9 +308,12 @@ export default function RoomPage() {
       setShowWordPicker(false);
     });
 
-    socket.on('match:finished', (results: MatchResult) => {
+    socket.on('match:finished', (results: MatchResult & { persisted?: boolean }) => {
       store().setPhase('MATCH_RESULT');
       setMatchResults(results);
+      if (results.persisted === false) {
+        setErrorMsg('Trận đấu không được lưu. Kết quả và replay có thể đã bị mất.');
+      }
     });
 
     socket.on('guess:accepted', (data: { playerId: string }) => {
@@ -864,6 +867,11 @@ export default function RoomPage() {
                     <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-on-arena">Tổng kết</p>
                     <h2 className="text-2xl md:text-3xl font-black tracking-tight">Kết quả</h2>
                   </div>
+                  {(matchResults as MatchResult & { persisted?: boolean }).persisted === false && (
+                    <p className="p-3 rounded-xl bg-destructive/10 text-danger-on-arena text-sm text-center" role="status">
+                      Trận đấu không được lưu. Kết quả và replay có thể đã bị mất.
+                    </p>
+                  )}
                   {matchResults.teams && (
                     <div className="p-4 rounded-xl bg-panel/60 border border-panel-border/30 text-center space-y-2">
                       <p className="font-bold text-lg">
