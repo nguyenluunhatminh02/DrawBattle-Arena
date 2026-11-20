@@ -241,7 +241,8 @@ export default function HomePage() {
                 </Button>
                 <button
                   onClick={() => setShowSettings(!showSettings)}
-                  className="w-full text-xs text-muted-on-arena hover:text-on-arena transition-colors"
+                  className="w-full min-h-11 text-xs text-muted-on-arena hover:text-on-arena transition-colors"
+                  aria-expanded={showSettings}
                 >
                   {showSettings ? 'Ẩn cài đặt phòng' : 'Tùy chỉnh cài đặt phòng'}
                 </button>
@@ -333,10 +334,11 @@ export default function HomePage() {
                     <label className="text-xs font-medium text-muted-on-arena">Gợi ý (hints)</label>
                     <button
                       onClick={() => setSettings(s => ({ ...s, enableHints: !s.enableHints }))}
-                      className={`w-11 h-6 rounded-full transition-colors ${settings.enableHints ? 'bg-primary' : 'bg-arena-800'}`}
+                      className={`flex min-h-11 min-w-11 shrink-0 items-center rounded-full transition-colors ${settings.enableHints ? 'bg-primary' : 'bg-arena-800'}`}
                       aria-label="Bật tắt gợi ý"
+                      aria-pressed={settings.enableHints}
                     >
-                      <div className={`w-5 h-5 rounded-full bg-white shadow transition-transform ${settings.enableHints ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                      <div className={`m-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${settings.enableHints ? 'translate-x-5' : 'translate-x-0'}`} />
                     </button>
                   </div>
                   <div>

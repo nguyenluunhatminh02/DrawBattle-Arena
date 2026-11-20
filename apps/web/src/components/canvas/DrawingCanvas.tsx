@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { COLORS, BRUSH_SIZES, GAME_CONSTANTS } from '@drawbattle/shared';
 import type { StrokeChunk } from '@drawbattle/shared';
 import { Button } from '@/components/ui/button';
+import { createStrokeId } from '@/lib/utils';
 
 interface DrawingCanvasProps {
   strokes: StrokeChunk[];
@@ -144,14 +145,14 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer) return;
     // Ignore multi-touch: only one active pointer at a time
-    if (activePointerIdRef.current !== null) return;
+    if (activePointerIdRef.current !== null || drawingRef.current) return;
     e.preventDefault();
-    activePointerIdRef.current = e.pointerId;
-    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
     const point = getCanvasPoint(e);
     if (!point) return;
+    activePointerIdRef.current = e.pointerId;
+    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
     drawingRef.current = true;
-    const strokeId = crypto.randomUUID();
+    const strokeId = createStrokeId();
     const isEraser = tool === 'eraser';
     currentStrokeRef.current = { strokeId, points: [point], color, width: brushSize, isEraser };
     seqRef.current = 0;
@@ -164,7 +165,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer || !drawingRef.current || !currentStrokeRef.current) return;
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
+    if (activePointerIdRef.current !== e.pointerId) return;
     e.preventDefault();
     const point = getCanvasPoint(e);
     if (!point) return;
@@ -217,7 +218,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer || !drawingRef.current || !currentStrokeRef.current) return;
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
+    if (activePointerIdRef.current !== e.pointerId) return;
     e.preventDefault();
     if (batchTimerRef.current) {
       clearInterval(batchTimerRef.current);
@@ -231,8 +232,8 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
 
   // A cancelled pointer (system gesture, incoming call, lost capture) must not
   // be committed as a completed stroke.
-  const handlePointerCancel = () => {
-    if (!isDrawer) return;
+  const handlePointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawer || activePointerIdRef.current !== e.pointerId) return;
     releasePointer();
   };
 

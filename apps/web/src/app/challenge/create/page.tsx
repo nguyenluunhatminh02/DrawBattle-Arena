@@ -10,6 +10,7 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { COLORS, BRUSH_SIZES } from '@drawbattle/shared';
 import { useGameStore } from '@/lib/store';
 import { api } from '@/lib/api';
+import { createStrokeId } from '@/lib/utils';
 
 interface Stroke {
   strokeId: string;
@@ -165,19 +166,19 @@ export default function ChallengeCreatePage() {
   }
 
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (finished || drawingRef.current) return;
+    if (finished || activePointerIdRef.current !== null || drawingRef.current) return;
     e.preventDefault();
-    activePointerIdRef.current = e.pointerId;
-    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
     const p = getPoint(e);
     if (!p) return;
+    activePointerIdRef.current = e.pointerId;
+    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
     drawingRef.current = true;
-    currentStrokeRef.current = { strokeId: crypto.randomUUID(), points: [p], color, width: brushSize };
+    currentStrokeRef.current = { strokeId: createStrokeId(), points: [p], color, width: brushSize };
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
     if (!drawingRef.current || !currentStrokeRef.current) return;
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
+    if (activePointerIdRef.current !== e.pointerId) return;
     e.preventDefault();
     const p = getPoint(e);
     if (!p) return;
@@ -187,7 +188,7 @@ export default function ChallengeCreatePage() {
 
   function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
     if (!drawingRef.current || !currentStrokeRef.current) return;
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
+    if (activePointerIdRef.current !== e.pointerId) return;
     e.preventDefault();
     drawingRef.current = false;
     activePointerIdRef.current = null;
@@ -197,7 +198,8 @@ export default function ChallengeCreatePage() {
   }
 
   // Cancelled pointers must not be committed as completed strokes.
-  function handlePointerCancel() {
+  function handlePointerCancel(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (activePointerIdRef.current !== e.pointerId) return;
     drawingRef.current = false;
     activePointerIdRef.current = null;
     currentStrokeRef.current = null;
