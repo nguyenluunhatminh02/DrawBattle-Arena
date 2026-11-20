@@ -22,7 +22,7 @@ Log format is Nest's default line-oriented console output. No request ids, room 
 
 - `match:finished` includes `persisted: boolean`; the room page can show a failure state when persistence failed.
 - `error` socket events carry codes (`ROOM_FULL`, `INVALID_PASSWORD`, `RATE_LIMITED`, etc.) — currently displayed in the UI but not collected centrally.
-- `apps/api/src/modules/analytics/funnel.controller.ts` accepts `POST /api/analytics/event` and exposes `GET /api/analytics/summary` behind `AdminGuard`. This is a product funnel table, **not** operational telemetry.
+- `apps/api/src/modules/analytics/funnel.controller.ts` accepts `POST /api/analytics/event` and exposes `GET /api/analytics/summary` behind `AdminGuard`. Events are persisted to `funnel_events` (migration `20261123_durable_render_jobs_funnel_events`); this is a product funnel table, **not** operational telemetry.
 
 ### External health checks
 

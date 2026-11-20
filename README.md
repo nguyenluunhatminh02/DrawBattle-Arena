@@ -52,7 +52,7 @@ These are open architecture/operations gaps, not covered by the regression suite
 - **Leaderboard**: All-time view is capped at the 2000 most recent matches; rankings are approximate.
 - **Rate limiting**: In-process in-memory buckets; limits reset on restart and are not shared across instances. Authenticated identity keys and `TRUST_PROXY` mitigate spoofing but do not make it distributed.
 - **Persistence/retention**: Drawings (strokes) and guesses are stored with finished matches and replay rows; there is no automated retention/privacy deletion job yet.
-- **Replay rendering**: GIF worker queue is in-memory, capped at 3 concurrent jobs, with no durable queue or retry after process restart.
+- **Replay rendering**: GIF render jobs and funnel events are persisted in PostgreSQL (`render_jobs`, `funnel_events`) by migration `20261123`, with retry counters and stale-lease recovery after a restart. Rendering itself is capped at 3 concurrent jobs per API process and GIF files still live on the API container filesystem.
 - **Admission control**: No load shedding or admission queue; overload can exhaust the API process.
 - **Observability**: Structured logs only; no distributed tracing, metrics, or alerting.
 - **Deployment/rollback**: Compose is suitable for a single host. `scripts/rollback-check.sh` documents the rollback procedure; automated image/DB snapshot rollback must be wired per environment.

@@ -96,7 +96,7 @@ any phase --last turn / too few players--> endMatch --> WAITING
 | Host change | `Room.hostPlayerId` update | Fire-and-forget `.catch(log)` on transfer or last-player leave. |
 | Match result | Full nested `Match` graph | One awaited write at `endMatch`; failure is reported in the socket payload, not retried. |
 | Settings | `Room.settings` JSON update | Awaited, errors logged; in-memory settings updated before the DB call. |
-| Replay GIF | `Replay.gifUrl` | Worker writes file then updates DB; queue/cron retries are best-effort. |
+| Replay GIF | `Replay.gifUrl`, `render_jobs` | Jobs are queued and claimed durably in `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`), with attempt counters, leases and stale recovery; the worker writes the file then updates `Replay.gifUrl`. The in-memory store is only a fallback when `render_jobs` is missing. |
 
 **Consistency gap:** if the API process dies mid-match, the in-memory match (including strokes and scores) is gone, and `match:cancelled` can only be sent to the *first* player who rejoins and finds no in-memory snapshot (gateway join path). There is no durable "match was in progress" marker that all clients receive. See [failure scenarios](./failure-scenarios.md) and [ADR-003](./adr/003-match-recovery-restart-cancel.md).
 

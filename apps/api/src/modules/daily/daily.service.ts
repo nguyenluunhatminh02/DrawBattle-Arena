@@ -96,6 +96,8 @@ export class DailyService {
         ? this.prisma.dailyChallengeAttempt.findFirst({
             where: { dailyChallengeId: challenge.id, ...identityWhere },
             orderBy: { createdAt: 'desc' },
+            // Never return the raw guess: it can itself be (or contain) the answer.
+            select: { id: true, correct: true, createdAt: true },
           })
         : Promise.resolve(null),
       this.prisma.dailyChallengeAttempt.count({ where: { dailyChallengeId: challenge.id } }),
@@ -104,12 +106,35 @@ export class DailyService {
       }),
     ]);
 
+    // DAILY-02: build an explicit DTO. Spreading the Prisma row would leak any
+    // newly added field (including the canonical word or its synonyms) before
+    // the caller has solved today's challenge.
+    const solved = userAttempt?.correct === true;
+    let answerCanonical: string | undefined;
+    if (solved) {
+      const word = await this.prisma.word.findUnique({
+        where: { id: challenge.word.id },
+        select: { canonical: true },
+      });
+      answerCanonical = word?.canonical;
+    }
+
     return {
-      ...challenge,
-      // DAILY-02: expose the canonical answer so a finished game can show it
-      // without leaking it to players who have not solved today's challenge.
-      answerCanonical: userAttempt?.correct ? challenge.word.canonical : undefined,
-      userAttempt,
+      id: challenge.id,
+      date: challenge.date,
+      word: {
+        id: challenge.word.id,
+        difficulty: challenge.word.difficulty,
+        category: challenge.word.category
+          ? { name: challenge.word.category.name }
+          : null,
+      },
+      replay: challenge.replay,
+      answerCanonical,
+      // Explicit sanitisation even if a caller/mock supplies a richer attempt.
+      userAttempt: userAttempt
+        ? { id: userAttempt.id, correct: userAttempt.correct, createdAt: userAttempt.createdAt }
+        : null,
       stats: {
         totalAttempts,
         correctAttempts,
@@ -121,16 +146,17 @@ export class DailyService {
   private findChallenge(today: Date) {
     return this.prisma.dailyChallenge.findUnique({
       where: { date: today },
-      include: {
+      select: {
+        id: true,
+        date: true,
+        replay: true,
         word: {
           select: {
             id: true,
-            canonical: true,
             difficulty: true,
             category: { select: { name: true } },
           },
         },
-        replay: true,
       },
     });
   }

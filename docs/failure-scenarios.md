@@ -64,8 +64,8 @@ Scope: what actually happens today at commit `92b3e23`. "Gap" marks missing beha
 
 ## 11. Replay render fails or times out
 
-- **Current behaviour:** worker timeout 60 s, max 3 concurrent jobs, errors logged. A 5-minute cron picks pending replays (`gifUrl: null`) again. `queueRender` is throttled to 3/min per identity.
-- **Gap:** no dead-letter queue, no retry counter, no alert; a deterministically failing replay is retried forever. GIF files live on the API container filesystem, so scaling/replacement loses them unless the volume is preserved.
+- **Current behaviour:** render jobs are persisted in `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`) with bounded attempts, leases and stale-job recovery; a process-local store is used only if that table is absent. Worker timeout is 60 s, rendering is capped at 3 concurrent jobs, and a 5-minute cron re-queues pending work. `queueRender` is throttled to 3/min per identity.
+- **Gap:** no dead-letter queue and no alert; a deterministically failing job ends in `failed` after its retry budget is exhausted and needs manual intervention. GIF files live on the API container filesystem, so scaling/replacement loses them unless the volume is preserved.
 
 ## 12. Rate-limit buckets grow unbounded / reset on restart
 

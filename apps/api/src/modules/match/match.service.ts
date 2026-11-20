@@ -9,8 +9,9 @@ export class MatchService {
     const matches = await this.prisma.match.findMany({
       where: {
         status: 'FINISHED',
-        // Public history must never enumerate PRIVATE room codes.
-        room: { visibility: { in: ['PUBLIC', 'UNLISTED'] } },
+        // P1-05: public history must only enumerate public rooms. UNLISTED
+        // rooms are reachable by direct link but must stay out of listings.
+        room: { visibility: 'PUBLIC' },
       },
       orderBy: { endedAt: 'desc' },
       take: Math.min(limit, 50),

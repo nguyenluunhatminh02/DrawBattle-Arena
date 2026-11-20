@@ -202,7 +202,8 @@ sequenceDiagram
   B->>API: POST /api/challenges/:id/finalize {strokes, durationMs}
   API->>DB: creator identity check + Replay create + challenge.replayId
   B->>API: POST /api/replays/:id/render (throttled 3/min)
-  API->>W: queue worker (max 3 concurrent, 60 s timeout)
+  API->>DB: upsert durable render_jobs row (migration 20261123)
+  API->>W: queue worker (max 3 concurrent, 60 s timeout; stale leases requeued)
   W->>W: render 640x400 GIF at 10 fps to public/replays
   W->>DB: replay.gifUrl = /replays/<id>.gif
   Solver->>API: POST /api/challenges/:id/guesses {answer}

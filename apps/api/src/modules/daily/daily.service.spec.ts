@@ -25,7 +25,14 @@ function createPrismaMock() {
   const challenge = {
     id: 'd1',
     date: today,
-    word: { canonical: 'mèo', synonyms: ['cat'] },
+    replay: null,
+    word: {
+      id: 'w1',
+      canonical: 'mèo',
+      synonyms: ['cat'],
+      difficulty: 'EASY',
+      category: { name: 'Động vật' },
+    },
   };
   return {
     dailyChallenge: {
@@ -39,6 +46,7 @@ function createPrismaMock() {
       create: jest.fn().mockImplementation(async ({ data }) => ({ id: 'a1', ...data })),
     },
     word: {
+      findUnique: jest.fn().mockResolvedValue({ canonical: 'mèo' }),
       findFirst: jest.fn().mockResolvedValue({ id: 'w1' }),
       update: jest.fn().mockResolvedValue({}),
     },
@@ -70,12 +78,48 @@ describe('DailyService hardening', () => {
   });
 
   it('returns answerCanonical only after a correct attempt', async () => {
-    prisma.dailyChallengeAttempt.findFirst.mockResolvedValue({ correct: true, answer: 'mèo' });
+    prisma.dailyChallengeAttempt.findFirst.mockResolvedValue({
+      id: 'a1', correct: true, createdAt: new Date(), answer: 'mèo',
+    });
     const info = await service.getTodaysChallenge('u1');
     expect(info.answerCanonical).toBe('mèo');
-    prisma.dailyChallengeAttempt.findFirst.mockResolvedValue({ correct: false, answer: 'sai' });
+    prisma.dailyChallengeAttempt.findFirst.mockResolvedValue({
+      id: 'a2', correct: false, createdAt: new Date(), answer: 'sai',
+    });
     const locked = await service.getTodaysChallenge('u1');
     expect(locked.answerCanonical).toBeUndefined();
+  });
+
+  it('does not leak the canonical answer or synonyms to an unsolved caller', async () => {
+    // A raw guess is itself sensitive: use the secret as the stored answer to
+    // prove that userAttempt is sanitised too.
+    prisma.dailyChallengeAttempt.findFirst.mockResolvedValue({
+      id: 'a2', correct: false, createdAt: new Date(), answer: 'mèo', normalized: 'meo',
+    });
+
+    const response = await service.getTodaysChallenge('u1');
+
+    expect(response.answerCanonical).toBeUndefined();
+    expect(response.word.canonical).toBeUndefined();
+    expect(response.word.synonyms).toBeUndefined();
+    expect(response.userAttempt.answer).toBeUndefined();
+    expect(response.userAttempt.normalized).toBeUndefined();
+    const serialized = JSON.stringify(response);
+    expect(serialized).not.toContain('mèo');
+    expect(serialized).not.toContain('meo');
+    expect(serialized).not.toContain('"synonyms"');
+  });
+
+  it('shows answerCanonical to a caller who has solved the daily', async () => {
+    prisma.dailyChallengeAttempt.findFirst.mockResolvedValue({
+      id: 'a1', correct: true, createdAt: new Date(), answer: 'mèo',
+    });
+
+    const response = await service.getTodaysChallenge('u1');
+
+    expect(response.answerCanonical).toBe('mèo');
+    expect(response.word.canonical).toBeUndefined();
+    expect(response.userAttempt.answer).toBeUndefined();
   });
 
   it('uses the account identity and ignores a guest token when both are present', async () => {

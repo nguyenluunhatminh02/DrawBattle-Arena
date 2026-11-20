@@ -11,7 +11,7 @@ describe('MatchService public visibility', () => {
     scores: [],
   });
 
-  it('excludes PRIVATE rooms from public match history', async () => {
+  it('lists only PUBLIC rooms in public match history', async () => {
     const findMany = jest.fn().mockResolvedValue([finishedMatch('PUBLIC')]);
     const service = new MatchService({ match: { findMany } } as never);
 
@@ -21,12 +21,23 @@ describe('MatchService public visibility', () => {
       expect.objectContaining({
         where: {
           status: 'FINISHED',
-          room: { visibility: { in: ['PUBLIC', 'UNLISTED'] } },
+          room: { visibility: 'PUBLIC' },
         },
       }),
     );
     expect(result.matches).toHaveLength(1);
     expect(result.matches[0].roomCode).toBe('CODE-PUBLIC');
+  });
+
+  it('never queries UNLISTED rooms for public match history', async () => {
+    const findMany = jest.fn().mockResolvedValue([]);
+    const service = new MatchService({ match: { findMany } } as never);
+
+    await service.listMatches(20, 0);
+
+    const where = findMany.mock.calls[0][0].where;
+    expect(where.room.visibility).toBe('PUBLIC');
+    expect(JSON.stringify(where)).not.toContain('UNLISTED');
   });
 
   it('does not expose PRIVATE match details or results', async () => {

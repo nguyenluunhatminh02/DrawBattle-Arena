@@ -86,9 +86,10 @@ Symptoms: `GET /api/replays/stats` shows many pending GIFs; `gifUrl` stays null.
 
 1. Check API logs for "Queued render", "Max concurrent renders", "Worker timeout", "Failed to render".
 2. Confirm `gif-worker.js` exists in the built output (log says "gif-worker.js not found at ..." otherwise → rebuild API image).
-3. Render is capped at 3 concurrent jobs with a 60 s timeout and a 5-minute cron sweep; wait one sweep before escalating.
-4. Check filesystem of the API container: `docker compose exec api ls -la /app/apps/api/public/replays`.
-5. A deterministically failing replay is retried forever by the cron — there is no dead-letter queue. Collect the error from logs; do not delete DB rows unless the replay is known bad.
+3. Render jobs are durable in `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`); a restart requeues stale leases. Rendering is capped at 3 concurrent jobs with a 60 s timeout and a 5-minute cron sweep; wait one sweep before escalating.
+4. Inspect queue state: `SELECT state, count(*) FROM render_jobs GROUP BY state;`. A fallback in-memory store is used only if the table is missing (check the startup warning).
+5. Check filesystem of the API container: `docker compose exec api ls -la /app/apps/api/public/replays`.
+6. A deterministically failing job ends in `failed` after its retry budget is exhausted — there is no dead-letter queue or alert. Read `error` from `render_jobs`; a public retry resets the budget. Do not delete rows unless the replay is known bad.
 
 ## 7. Rate-limit complaints
 
@@ -115,8 +116,9 @@ GROUP BY r.id, r.code, r.status
 HAVING count(rp.id) FILTER (WHERE rp."leftAt" IS NULL) > 0
 ORDER BY active_players DESC;
 
--- Pending replays
+-- Pending replays and durable render jobs
 SELECT count(*) FROM replays WHERE gif_url IS NULL;
+SELECT state, count(*) FROM render_jobs GROUP BY state;
 
 -- Recent finished matches and persistence evidence
 SELECT id, room_id, status, ended_at FROM matches ORDER BY started_at DESC LIMIT 20;
