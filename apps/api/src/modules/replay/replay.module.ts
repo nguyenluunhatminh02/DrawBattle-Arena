@@ -7,6 +7,6 @@ import { ReplayJobService } from './replay-jobs';
 @Module({
   controllers: [ReplayController],
   providers: [ReplayService, ReplayWorker, ReplayJobService],
-  exports: [ReplayService, ReplayJobService],
+  exports: [ReplayService, ReplayJobService, ReplayWorker],
 })
 export class ReplayModule {}
