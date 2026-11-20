@@ -17,3 +17,6 @@ apps/api/public/replays/*.gif
 apps/web/test-results/
 apps/web/playwright-report/
 *.tsbuildinfo
+.playwright-mcp/
+test-results/
+playwright-report/
