@@ -82,7 +82,7 @@
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible {
-    outline: 3px solid hsl(var(--ring));
+    outline: 3px solid hsl(var(--accent-on-arena));
     outline-offset: 2px;
   }
 }

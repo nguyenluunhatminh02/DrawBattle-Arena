@@ -239,7 +239,7 @@ export default function ProfilePage() {
               </Button>
             </div>
 
-            <Button onClick={handleLogout} variant="ghost" className="h-11 w-full text-muted-on-arena hover:text-on-arena">
+            <Button onClick={handleLogout} variant="secondary" className="h-11 w-full">
               Đăng xuất
             </Button>
           </>

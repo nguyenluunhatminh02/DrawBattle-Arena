@@ -50,7 +50,7 @@ export default function HistoryPage() {
         )}
 
         {error && (
-          <div role="alert" className="panel-arena rounded-xl border-destructive p-6 text-sm text-destructive">
+          <div role="alert" className="panel-arena rounded-xl border-danger-on-arena p-6 text-sm text-danger-on-arena">
             Không thể tải lịch sử trận đấu. Vui lòng thử lại sau.
           </div>
         )}

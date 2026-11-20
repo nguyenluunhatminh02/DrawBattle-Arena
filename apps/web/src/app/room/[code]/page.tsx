@@ -634,13 +634,13 @@ export default function RoomPage() {
       {teams && currentPhase && currentPhase !== 'WAITING' && currentPhase !== 'MATCH_RESULT' && (
         <div className="flex items-center justify-center gap-3 md:gap-6 px-2 md:px-4 py-1.5 border-b border-panel-border/30 bg-panel/50 text-xs overflow-x-auto no-scrollbar">
           <div className="flex items-center gap-1.5">
-            <Badge className={`${myTeam === 'A' ? 'bg-team-a text-white' : 'bg-panel text-on-arena'} shrink-0`}>● Đội A</Badge>
+            <Badge className={`${myTeam === 'A' ? 'bg-team-a text-paper-ink' : 'bg-panel text-on-arena'} shrink-0`}>● Đội A</Badge>
             <span className="text-muted-on-arena whitespace-nowrap">
               {teams.teamA.map(m => m.nickname + (m.id === myPlayerId ? ' (bạn)' : '')).join(', ')}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <Badge className={`${myTeam === 'B' ? 'bg-team-b text-white' : 'bg-panel text-on-arena'} shrink-0`}>▲ Đội B</Badge>
+            <Badge className={`${myTeam === 'B' ? 'bg-team-b text-paper-ink' : 'bg-panel text-on-arena'} shrink-0`}>▲ Đội B</Badge>
             <span className="text-muted-on-arena whitespace-nowrap">
               {teams.teamB.map(m => m.nickname + (m.id === myPlayerId ? ' (bạn)' : '')).join(', ')}
             </span>
@@ -673,7 +673,7 @@ export default function RoomPage() {
                         <span className="truncate min-w-0 text-sm">{p.nickname}{p.id === myPlayerId ? ' (bạn)' : ''}</span>
                         <div className="flex gap-1 items-center flex-wrap justify-end shrink-0">
                           {!p.isOnline && <Badge variant="outline" className="border-danger-on-arena/50 text-danger-on-arena">Ngoại tuyến</Badge>}
-                          {p.isReady && <Badge className="bg-success text-white">Sẵn sàng</Badge>}
+                          {p.isReady && <Badge className="bg-success text-paper-ink">Sẵn sàng</Badge>}
                           {p.isOnline && !p.isReady && !p.isHost && <Badge variant="outline" className="text-muted-on-arena font-normal border-panel-border/30">Chưa sẵn sàng</Badge>}
                           {p.isMuted && <Badge variant="secondary">Đã tắt tiếng</Badge>}
                           {p.isHost && <Badge>Chủ phòng</Badge>}

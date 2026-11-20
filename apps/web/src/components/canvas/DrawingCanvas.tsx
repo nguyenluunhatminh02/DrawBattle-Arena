@@ -246,14 +246,14 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
           <div className="flex gap-1 shrink-0">
             <button
               onClick={() => setTool('pen')}
-              className={`w-11 h-11 rounded flex items-center justify-center text-base ${tool === 'pen' ? 'bg-primary font-bold text-primary-foreground' : 'bg-panel text-on-arena'}`}
+              className={`w-11 h-11 rounded flex items-center justify-center text-base ${tool === 'pen' ? 'bg-primary font-bold text-primary-foreground' : 'bg-arena-800 text-on-arena ring-1 ring-panel-border/50'}`}
               title="Bút"
             >
               ✏️
             </button>
             <button
               onClick={() => setTool('eraser')}
-              className={`w-11 h-11 rounded flex items-center justify-center text-base ${tool === 'eraser' ? 'bg-primary font-bold text-primary-foreground' : 'bg-panel text-on-arena'}`}
+              className={`w-11 h-11 rounded flex items-center justify-center text-base ${tool === 'eraser' ? 'bg-primary font-bold text-primary-foreground' : 'bg-arena-800 text-on-arena ring-1 ring-panel-border/50'}`}
               title="Tẩy"
             >
               🧹
@@ -278,7 +278,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
               <button
                 key={s}
                 onClick={() => setBrushSize(s)}
-                className={`w-11 h-11 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary text-primary-foreground' : 'bg-panel text-on-arena'}`}
+                className={`w-11 h-11 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary text-primary-foreground' : 'bg-arena-800 text-on-arena ring-1 ring-panel-border/50'}`}
                 aria-label={`Cỡ nét ${s}`}
                 aria-pressed={brushSize === s}
               >
