@@ -224,6 +224,7 @@ model Replay {
   turn            Turn?            @relation(fields: [turnId], references: [id])
   challenge       Challenge?
   dailyChallenge  DailyChallenge?  @relation(fields: [dailyId], references: [id])
+  renderJob       RenderJob?
 
   @@map("replays")
 }
@@ -410,4 +411,44 @@ model ModerationAction {
   @@index([targetType, targetId])
   @@index([createdAt])
   @@map("moderation_actions")
+}
+
+enum RenderJobState {
+  queued
+  running
+  completed
+  failed
+}
+
+/// Durable render queue for replay GIF generation.
+model RenderJob {
+  id           String         @id @default(cuid())
+  replayId     String         @unique @map("replay_id")
+  state        RenderJobState @default(queued)
+  attempts     Int            @default(0)
+  maxAttempts  Int            @default(3) @map("max_attempts")
+  error        String?
+  lockedBy     String?        @map("locked_by")
+  lockedAt     DateTime?      @map("locked_at")
+  nextAttemptAt DateTime      @default(now()) @map("next_attempt_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  replay Replay @relation(fields: [replayId], references: [id], onDelete: Cascade)
+
+  @@index([state, nextAttemptAt])
+  @@map("render_jobs")
+}
+
+/// Durable funnel event log for product analytics.
+model FunnelEvent {
+  id        String   @id @default(cuid())
+  event     String   @map("event")
+  sessionId String   @map("session_id")
+  data      Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([event, createdAt])
+  @@map("funnel_events")
 }
