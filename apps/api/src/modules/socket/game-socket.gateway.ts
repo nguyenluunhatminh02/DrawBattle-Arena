@@ -575,9 +575,15 @@ export class GameSocketGateway
     switch (data.action) {
       case 'kick': {
         const targetSocket = this.roomSockets.get(roomId)?.get(data.targetId);
-        // Persist the ban before removal: resolve identities from the DB, not
-        // the socket, so offline targets and token rotation cannot evade it.
-        // Never remove the player first - a failed DB write would fail open.
+        // Authorize the kick in game state before any durable write. A forged
+        // or stale hostAction must never create a DB ban.
+        if (!this.game.kickPlayer(roomId, playerId, data.targetId)) {
+          socket.emit('error', 'KICK_FAILED', 'Cannot kick player');
+          break;
+        }
+        // Resolve identities from the DB, not the socket, so offline targets
+        // and token rotation cannot evade the ban. If persistence fails, do
+        // not leave a kicked player who can freely rejoin.
         let banned: { userId: string | null; guestSessionId: string | null };
         try {
           banned = await this.roomService.banPlayer(roomId, data.targetId);
@@ -587,10 +593,6 @@ export class GameSocketGateway
             err instanceof Error ? err.message : String(err),
           );
           socket.emit('error', 'KICK_FAILED', 'Failed to persist kick');
-          break;
-        }
-        if (!this.game.kickPlayer(roomId, playerId, data.targetId)) {
-          socket.emit('error', 'KICK_FAILED', 'Cannot kick player');
           break;
         }
         // Best-effort fast path only; joinRoom checks the DB authoritatively.
