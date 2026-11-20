@@ -36,4 +36,44 @@ describe('MatchService public visibility', () => {
     await expect(service.getMatch('match-PRIVATE')).rejects.toBeInstanceOf(NotFoundException);
     await expect(service.getMatchResults('match-PRIVATE')).rejects.toBeInstanceOf(NotFoundException);
   });
+
+  it('filters my matches by scored participation, not rooms joined', async () => {
+    const roomPlayerFindMany = jest.fn().mockResolvedValue([{ id: 'rp-1' }]);
+    const matchFindMany = jest.fn().mockResolvedValue([]);
+    const service = new MatchService({
+      roomPlayer: { findMany: roomPlayerFindMany },
+      match: { findMany: matchFindMany },
+    } as never);
+
+    const result = await service.getMyMatches({ userId: 'user-1', guestSessionId: null });
+
+    expect(roomPlayerFindMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      select: { id: true },
+    });
+    expect(matchFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          status: 'FINISHED',
+          scores: { some: { playerId: { in: ['rp-1'] } } },
+        },
+      }),
+    );
+    expect(result).toEqual({ matches: [] });
+  });
+
+  it('returns no matches when neither identity is present', async () => {
+    const roomPlayerFindMany = jest.fn();
+    const matchFindMany = jest.fn();
+    const service = new MatchService({
+      roomPlayer: { findMany: roomPlayerFindMany },
+      match: { findMany: matchFindMany },
+    } as never);
+
+    const result = await service.getMyMatches({ userId: null, guestSessionId: null });
+
+    expect(result).toEqual({ matches: [] });
+    expect(roomPlayerFindMany).not.toHaveBeenCalled();
+    expect(matchFindMany).not.toHaveBeenCalled();
+  });
 });

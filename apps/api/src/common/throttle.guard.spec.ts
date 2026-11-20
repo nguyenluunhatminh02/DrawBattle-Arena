@@ -79,4 +79,15 @@ describe('ThrottleGuard', () => {
     expect(guard.canActivate(ctxB)).toBe(true);
     expect(() => guard.canActivate(ctxA)).toThrow();
   });
+
+  it('bounds the bucket map against rotating identities', () => {
+    mockReflector.get.mockReturnValue({ limit: 100, windowMs: 60_000, keyPrefix: 'bounded' });
+    const buckets = (guard as any).buckets as Map<string, unknown>;
+
+    for (let i = 0; i < 10_020; i++) {
+      guard.canActivate(makeContext('127.0.0.1', { user: { id: `rotating-${i}` } }));
+    }
+
+    expect(buckets.size).toBeLessThanOrEqual(10_000);
+  });
 });

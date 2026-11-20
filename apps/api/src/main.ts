@@ -3,6 +3,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
+import { AccountBodyValidationGuard } from './common/account-body-validation.guard';
 
 async function bootstrap() {
   const secret = process.env.JWT_SECRET;
@@ -39,6 +40,9 @@ async function bootstrap() {
       transform: true,
     }),
   );
+  // /account/login and /account/register have inline body types in their
+  // controller; this guard applies class-validator DTOs to those two routes.
+  app.useGlobalGuards(new AccountBodyValidationGuard());
 
   app.setGlobalPrefix('api');
   app.useStaticAssets(join(process.cwd(), 'public'));

@@ -124,16 +124,29 @@ export class MatchService {
     };
   }
 
-  async getMyMatches(guestSessionId: string) {
-    const roomPlayers = await this.prisma.roomPlayer.findMany({
-      where: { guestSessionId },
-      select: { roomId: true },
+  async getMyMatches(identity: { userId: string | null; guestSessionId: string | null }) {
+    const { userId, guestSessionId } = identity;
+    if (!userId && !guestSessionId) return { matches: [] };
+
+    // Joining a room is not participation: only a persisted score means the
+    // player actually took part in the match. Scores are tied to RoomPlayer,
+    // which is the single place both guest and account identities are stored.
+    const identityFilter = {
+      ...(userId ? { userId } : {}),
+      ...(guestSessionId ? { guestSessionId } : {}),
+    };
+    const scoredPlayerIds = await this.prisma.roomPlayer.findMany({
+      where: identityFilter,
+      select: { id: true },
     });
-    const roomIds = roomPlayers.map(p => p.roomId);
-    if (roomIds.length === 0) return { matches: [] };
+    const playerIds = scoredPlayerIds.map(p => p.id);
+    if (playerIds.length === 0) return { matches: [] };
 
     const matches = await this.prisma.match.findMany({
-      where: { roomId: { in: roomIds }, status: 'FINISHED' },
+      where: {
+        status: 'FINISHED',
+        scores: { some: { playerId: { in: playerIds } } },
+      },
       orderBy: { endedAt: 'desc' },
       take: 20,
       include: {

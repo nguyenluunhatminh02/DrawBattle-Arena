@@ -1,10 +1,19 @@
-import { Controller, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  Req,
+  UnauthorizedException,
+  UseGuards,
+} from '@nestjs/common';
 import { MatchService } from './match.service';
-import { GuestGuard } from '../auth/guest.guard';
+import { OptionalAuthGuard } from '../auth/optional-auth.guard';
 import type { Request } from 'express';
 
-interface GuestRequest extends Request {
+interface IdentityRequest extends Request {
   guest?: { sessionId: string; nickname: string };
+  user?: { id: string; nickname?: string };
 }
 
 @Controller('matches')
@@ -20,10 +29,16 @@ export class MatchController {
   }
 
   @Get('me')
-  @UseGuards(GuestGuard)
-  myMatches(@Req() req: GuestRequest) {
-    const guest = req.guest!;
-    return this.matchService.getMyMatches(guest.sessionId);
+  @UseGuards(OptionalAuthGuard)
+  myMatches(@Req() req: IdentityRequest) {
+    const userId = req.user?.id ?? null;
+    const guestSessionId = req.guest?.sessionId ?? null;
+    // OptionalAuth never rejects; require a real identity so scores cannot be
+    // enumerated anonymously, and treat an unrelated token as unauthenticated.
+    if (!userId && !guestSessionId) {
+      throw new UnauthorizedException('Guest or user token required');
+    }
+    return this.matchService.getMyMatches({ userId, guestSessionId });
   }
 
   @Get(':id')

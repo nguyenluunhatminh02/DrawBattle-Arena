@@ -18,7 +18,12 @@ export class OptionalAuthGuard implements CanActivate {
     try {
       const payload = this.jwtService.verify(token);
       if (payload.type === 'user') {
-        request.user = { id: payload.sub, type: payload.type, nickname: payload.nickname };
+        // A verified signature is not enough: deleted accounts must not keep
+        // working, and the role/existence check must match AuthGuard.
+        const user = await this.auth.validateUserToken(token);
+        if (user) {
+          request.user = { id: user.userId, type: user.type, nickname: user.nickname };
+        }
       } else if (payload.type === 'guest') {
         const session = await this.auth.validateGuestToken(token);
         if (session) request.guest = session;
