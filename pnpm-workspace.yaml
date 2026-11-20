@@ -2,6 +2,11 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
+overrides:
+  # @nestjs/platform-express 10.x pins multer 2.0.2; force the patched line
+  # without a framework major upgrade. multer 2.x keeps the same API.
+  multer: 2.5.0
+
 onlyBuiltDependencies:
   - '@prisma/client'
   - '@prisma/engines'

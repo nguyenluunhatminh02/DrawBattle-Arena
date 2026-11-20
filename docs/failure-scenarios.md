@@ -82,3 +82,22 @@ Scope: what actually happens today at commit `92b3e23`. "Gap" marks missing beha
 
 - **Current behaviour:** chat messages are rejected on profanity; wrong guesses are censored in chat broadcast; nicknames are validated at creation. Mutes are enforced in gateway handlers.
 - **Gap:** correct guesses are not profanity-filtered (no text is broadcast for them, so no direct leak); private word and hint text come from the curated word list.
+
+## 15. Production dependency advisories after P1-04
+
+`pnpm audit --prod` baseline at commit `e60c985`: **64 advisories** (4 critical, 29 high, 27 moderate, 4 low). After upgrading Next.js `14.2.35` -> `15.5.29`, `eslint-config-next` to `15.5.29`, and forcing the transitive `multer` `2.0.2` -> `2.5.0` through a pnpm workspace override: **29 advisories** (1 critical, 13 high, 14 moderate, 1 low). Next.js and multer advisories are fully cleared; API and web builds, API typecheck, web typecheck and all Jest tests pass.
+
+Residual advisories are left unfixed because the available fixes require major framework/library upgrades that were out of scope for this change:
+
+| Advisory group | Installed version | Required fix | Why deferred |
+| --- | --- | --- | --- |
+| `tar` (12 advisories, includes critical GHSA-23hp-3jrh-7fpw) | `6.2.1` via `bcrypt` -> `@mapbox/node-pre-gyp` -> `tar` | `>=7.5.21` (major) | `@mapbox/node-pre-gyp` pins tar 6.x; forcing tar 7 is a major API change in a native module install-time dependency and was not validated here. Tar is only used when building/installing bcrypt, not at request time. |
+| `body-parser` (2 advisories) / `qs` (4) | `1.20.4` / `6.14.3` via `@nestjs/platform-express@10.4.22` | body-parser `>=1.20.9`, qs `>=6.16.1` | Express 4 pins body-parser 1.20.x and qs 6.x through Nest 10. A Nest 11/Express 5 major upgrade is required for supported versions; request body size limits are configured explicitly. |
+| `lodash` (2 advisories) | `4.17.21` via `@nestjs/config` | `4.17.23` / `4.18.1` | `@nestjs/config` 3.x resolves lodash 4.17.21 in the lockfile; the patched line requires a Nest major upgrade. The vulnerable `_.template`/`_.unset` paths are not used in application code. |
+| `@nestjs/core` (GHSA-36xv-jgw5-4q75) | `10.4.22` | `>=11.1.18` (major) | Nest 11 upgrade touches platform-express, websockets, schedule, config and testing packages; deferred as a coordinated framework migration. |
+| `file-type` (2 advisories) | `20.4.1` via `@nestjs/common` | `>=21.3.2` (major) | Pulled transitively by Nest 10; upgrading requires the same Nest 11 migration. Filenames/content types for uploads are additionally checked by application code. |
+| `postcss` (4 advisories) | `8.4.31` via Next.js's bundled PostCSS | `>=8.5.23` | Next 15 still pins 8.4.31 in its internal dependency tree; a direct override was not attempted because PostCSS is build-time only and affects source-map handling from trusted local CSS. |
+| `uuid` (GHSA-w5hq-g745-h8pq) | `10.0.0` | `>=11.1.1` (major) | The application uses `uuid` v10 APIs; v11 is a major version and is deferred to a dedicated upgrade. |
+| `zod` (GHSA-mrhx-c7xc-m3w5) | `3.25.76` in `packages/shared` | `>=4.6.6` (major) | Zod 4 changes parser API and error shapes across the shared schemas and both apps; deferred as a coordinated migration. |
+
+No advisory was silently suppressed. Re-run `pnpm audit --prod` before each release; the counts above are the exact accepted baseline.

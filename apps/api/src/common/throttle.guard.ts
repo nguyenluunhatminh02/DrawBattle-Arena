@@ -4,8 +4,12 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { createClient, type RedisClientType } from 'redis';
+import { recordMetric } from './metrics-counters';
 
 export interface ThrottleConfig {
   limit: number;
@@ -17,6 +21,27 @@ export interface ThrottleConfig {
 // guest session IDs cannot grow this Map without bound. Stale buckets are
 // reclaimed even when the map is not full.
 const MAX_BUCKETS = 10_000;
+const REDIS_KEY_PREFIX = 'drawbattle:throttle:';
+/** Silent fallback when Redis is unavailable must not swallow all abuse. */
+const REDIS_FAILURE_LOG_INTERVAL_MS = 60_000;
+
+/**
+ * Atomic fixed-window counter. Returns [count, ttlMs]; INCR and EXPIRE are
+ * applied in one round trip so concurrent API instances share one bucket and
+ * a failed EXPIRE can never leave a key without a TTL.
+ */
+const THROTTLE_SCRIPT = `
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  ttl = ARGV[1]
+end
+return { current, ttl }
+`;
 
 export const THROTTLE_KEY = 'throttle_config';
 
@@ -31,13 +56,27 @@ export function Throttle(config: ThrottleConfig) {
   };
 }
 
+type Bucket = { count: number; resetAt: number };
+
+/**
+ * Global HTTP throttle. Uses a shared Redis fixed-window bucket when REDIS_URL
+ * is configured and the client is connected; otherwise it falls back to the
+ * original process-local buckets. Redis errors are logged at most once a
+ * minute and never fail a request.
+ */
 @Injectable()
-export class ThrottleGuard implements CanActivate {
-  private readonly buckets = new Map<string, { count: number; resetAt: number }>();
+export class ThrottleGuard implements CanActivate, OnModuleDestroy {
+  private readonly logger = new Logger(ThrottleGuard.name);
+  private readonly buckets = new Map<string, Bucket>();
+  private readonly redis: RedisClientType | null;
+  private redisDisabled = false;
+  private lastRedisFailureAt = 0;
 
-  constructor(private readonly reflector: Reflector) {}
+  constructor(private readonly reflector: Reflector) {
+    this.redis = this.createRedisClient();
+  }
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const config =
       this.reflector.get<ThrottleConfig>(THROTTLE_KEY, context.getHandler()) ??
       this.reflector.get<ThrottleConfig>(THROTTLE_KEY, context.getClass());
@@ -54,8 +93,75 @@ export class ThrottleGuard implements CanActivate {
       ? `identity:${identity}`
       : request.ip ?? request.socket?.remoteAddress ?? 'unknown';
     const key = `${config.keyPrefix ?? 'global'}:${ip}`;
-    const now = Date.now();
 
+    // parseInt yields NaN for malformed values; `|| 1` hides that but also
+    // silently accepts negatives/fractionals. Clamp to a finite positive
+    // integer so a bad env var can never disable or inflate the rate limit.
+    const parsedMult = Number.parseInt(process.env.THROTTLE_MULT ?? '1', 10);
+    const mult = Number.isFinite(parsedMult) && parsedMult > 0 ? Math.floor(parsedMult) : 1;
+    const limit = config.limit * mult;
+
+    const allowed = this.redis && !this.redisDisabled
+      ? await this.checkRedis(key, config.windowMs, limit)
+      : this.checkLocal(key, config.windowMs, limit);
+    if (!allowed) {
+      recordMetric('throttle_rejects_total');
+      recordMetric(`throttle_rejects_${config.keyPrefix ?? 'global'}`);
+      throw new HttpException('Rate limit exceeded', HttpStatus.TOO_MANY_REQUESTS);
+    }
+    return true;
+  }
+
+  async onModuleDestroy() {
+    if (this.redis?.isOpen) await this.redis.quit().catch(() => undefined);
+  }
+
+  private createRedisClient(): RedisClientType | null {
+    const url = process.env.REDIS_URL;
+    if (!url) return null;
+    try {
+      const client = createClient({ url }) as RedisClientType;
+      client.on('error', err => this.onRedisError(err));
+      // Connection failures are reported by the 'error' handler; catch here so
+      // boot never fails just because rate limiting must use the fallback.
+      void client.connect().catch(err => this.onRedisError(err));
+      return client;
+    } catch (err) {
+      this.onRedisError(err);
+      return null;
+    }
+  }
+
+  private onRedisError(err: unknown): void {
+    // A dead Redis must not take down the HTTP API, but silence would hide the
+    // fact that throttling degraded to per-process buckets.
+    if (Date.now() - this.lastRedisFailureAt < REDIS_FAILURE_LOG_INTERVAL_MS) return;
+    this.lastRedisFailureAt = Date.now();
+    this.logger.warn(
+      `Redis throttle unavailable; using in-memory buckets (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+
+  private async checkRedis(key: string, windowMs: number, limit: number): Promise<boolean> {
+    const client = this.redis;
+    if (!client?.isReady) return this.checkLocal(key, windowMs, limit);
+    try {
+      const result = (await client.eval(THROTTLE_SCRIPT, {
+        keys: [`${REDIS_KEY_PREFIX}${key}`],
+        arguments: [String(windowMs)],
+      })) as [number, number];
+      return Number(result[0]) <= limit;
+    } catch (err) {
+      this.onRedisError(err);
+      // Stop trying for this process: repeated awaited failures on every
+      // request would add latency and log noise while Redis is down.
+      this.redisDisabled = true;
+      return this.checkLocal(key, windowMs, limit);
+    }
+  }
+
+  private checkLocal(key: string, windowMs: number, limit: number): boolean {
+    const now = Date.now();
     let bucket = this.buckets.get(key);
     if (!bucket || now >= bucket.resetAt) {
       // Reclaim expired buckets lazily, and evict the oldest entries if the
@@ -65,20 +171,11 @@ export class ThrottleGuard implements CanActivate {
         const oldest = this.buckets.keys().next().value;
         if (oldest !== undefined) this.buckets.delete(oldest);
       }
-      bucket = { count: 0, resetAt: now + config.windowMs };
+      bucket = { count: 0, resetAt: now + windowMs };
       this.buckets.set(key, bucket);
     }
-
-    // parseInt yields NaN for malformed values; `|| 1` hides that but also
-    // silently accepts negatives/fractionals. Clamp to a finite positive
-    // integer so a bad env var can never disable or inflate the rate limit.
-    const parsedMult = Number.parseInt(process.env.THROTTLE_MULT ?? '1', 10);
-    const mult = Number.isFinite(parsedMult) && parsedMult > 0 ? Math.floor(parsedMult) : 1;
     bucket.count++;
-    if (bucket.count > config.limit * mult) {
-      throw new HttpException('Rate limit exceeded', HttpStatus.TOO_MANY_REQUESTS);
-    }
-    return true;
+    return bucket.count <= limit;
   }
 
   private pruneExpired(now: number): void {

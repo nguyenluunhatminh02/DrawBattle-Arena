@@ -28,7 +28,19 @@ Log format is Nest's default line-oriented console output. No request ids, room 
 
 `docker-compose.yml` health checks exist for PostgreSQL (`pg_isready`) and Redis (`redis-cli ping`). There is no API or web health endpoint.
 
-## 2. Proposed metrics (not implemented)
+## 2. Minimal metrics endpoint (implemented)
+
+`GET /api/metrics` (admin-only, `AdminGuard`) returns a small JSON payload with:
+
+- `counts.replayBacklog` — pending/failed render jobs from `ReplayJobService.pendingCount()` (`-1` if the store is unavailable).
+- `counts.activeRooms` — rooms with status `WAITING` or `PLAYING` from PostgreSQL (`-1` if the DB query fails).
+- `counts.throttleRejects` — HTTP 429 responses emitted by `ThrottleGuard` since process start.
+- `counters` — the raw process-local counter map (currently the throttle reject totals by route prefix).
+- `redisAdapterEnabled` — `RedisAdapterService.isEnabled()`, useful for detecting single-instance degradation.
+
+These are process-local counters that reset on restart; they are intentionally lightweight (no new dependencies, no DB writes on the request path) and complement, rather than replace, the full metrics plan below.
+
+## 3. Proposed metrics (not implemented)
 
 Instrument with `prom-client` or an OpenTelemetry SDK exposed at `GET /api/metrics` (internal only). Recommended first slice:
 
@@ -51,19 +63,19 @@ Instrument with `prom-client` or an OpenTelemetry SDK exposed at `GET /api/metri
 
 Do **not** use raw room codes, user ids or session ids as metric labels — high cardinality and privacy risk. Use coarse labels only.
 
-## 3. Proposed structured logging (not implemented)
+## 4. Proposed structured logging (not implemented)
 
 - Adopt JSON logs with fields: `ts`, `level`, `service`, `instanceId`, `traceId`, `roomId` (opaque internal id), `playerId` (internal id), `event`, `code`, `durationMs`, `error`.
 - Add a correlation id from HTTP `X-Request-Id` / Socket.IO handshake and include it in `error` events and client console reports.
 - Never log raw JWTs, room passwords, guest tokens or full stroke payloads.
 
-## 4. Proposed traces (not implemented)
+## 5. Proposed traces (not implemented)
 
 - Trace REST requests end-to-end (Nest → Prisma) using OpenTelemetry.
 - For socket flows, create a span per `room:join` (auth → ban/password/capacity → init → snapshot) and per `endMatch` (score calculation → nested write → emit).
 - Export to an OTLP collector; sample 10% of joins and 100% of failed persists.
 
-## 5. Alerts (proposed thresholds — tune after a load test)
+## 6. Alerts (proposed thresholds — tune after a load test)
 
 | Alert | Condition | Severity |
 | --- | --- | --- |
@@ -77,13 +89,13 @@ Do **not** use raw room codes, user ids or session ids as metric labels — high
 | Replay backlog | `pending replays > 50` for 30 minutes | ticket |
 | Memory growth | API RSS grows > 20% over 1 hour without drop | ticket (HTTP throttle buckets are never purged) |
 
-## 6. Dashboards (proposed)
+## 7. Dashboards (proposed)
 
 1. **Live gameplay** — active rooms, players online, events/s by type, rejections by code, p95 stroke/guess latency, active timers.
 2. **Persistence health** — join latency and failures, match persist latency/failures, Prisma pool usage, cleanup counts.
 3. **Infrastructure** — API CPU/memory/restarts, Redis adapter state and pub/sub errors, PostgreSQL connections/locks, replay backlog and render duration.
 4. **Reliability** — reconnects (inside/outside grace), `match:cancelled` count, `persisted:false` count, rate-limit rejections.
 
-## 7. Minimally useful first implementation
+## 8. Minimally useful first implementation
 
 If only one sprint is available: (1) add an API `/health` endpoint that reports DB connectivity and `redisAdapter.isEnabled()`; (2) switch Nest Logger to JSON with `instanceId`; (3) expose `/metrics` with the first six metrics from §2; (4) page on persist failures and API restarts. That closes the largest blind spots called out in [failure scenarios](./failure-scenarios.md) without redesigning the game.

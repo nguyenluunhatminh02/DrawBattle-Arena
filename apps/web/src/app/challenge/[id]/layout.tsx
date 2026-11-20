@@ -26,9 +26,10 @@ async function getChallengeInfo(id: string): Promise<ChallengeMeta | null> {
 export async function generateMetadata({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }): Promise<Metadata> {
-  const info = await getChallengeInfo(params.id);
+  const { id } = await params;
+  const info = await getChallengeInfo(id);
 
   if (!info || info.status === 'EXPIRED') {
     return {
@@ -38,7 +39,7 @@ export async function generateMetadata({
   }
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3002';
-  const challengeUrl = `${baseUrl}/challenge/${params.id}`;
+  const challengeUrl = `${baseUrl}/challenge/${id}`;
 
   return {
     title: 'DrawBattle - Bạn đoán được không?',
