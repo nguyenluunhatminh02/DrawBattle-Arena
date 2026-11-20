@@ -104,11 +104,7 @@ test.describe('E2E regression matrix', () => {
       }));
     });
     await page.goto(`${WEB}/daily`);
-    // The persisted store hydrates asynchronously. If the route redirects before
-    // hydration, revisit once the seeded token has been read.
-    await page.waitForTimeout(500);
-    if (page.url().endsWith('/')) await page.goto(`${WEB}/daily`);
-    await page.waitForFunction(() => !!document.querySelector('input[placeholder="Nhập đáp án..."]'), null, {
+    await page.waitForFunction(() => !!document.querySelector('[data-testid="daily-replay-canvas-container"]'), null, {
       timeout: 15000,
     });
     const canvas = page.getByTestId('daily-replay-canvas');

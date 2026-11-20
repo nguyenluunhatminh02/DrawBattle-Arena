@@ -46,6 +46,7 @@ export default function DailyChallengePage() {
   const [remaining, setRemaining] = useState<number | null>(null);
   const [guessError, setGuessError] = useState<string | null>(null);
   const [guessing, setGuessing] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -132,6 +133,11 @@ export default function DailyChallengePage() {
   const activeToken = authToken ?? player?.token;
 
   useEffect(() => {
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
     if (!activeToken) {
       router.push('/');
       return;
@@ -153,7 +159,7 @@ export default function DailyChallengePage() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [activeToken, router]);
+  }, [activeToken, hydrated, router]);
 
   async function handleGuess() {
     if (!answer.trim() || !daily || guessing) return;
