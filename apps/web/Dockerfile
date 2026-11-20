@@ -10,6 +10,7 @@ RUN pnpm install --frozen-lockfile --filter @drawbattle/web... --filter @drawbat
 
 FROM base AS build
 COPY --from=deps /app ./
+COPY tsconfig.json ./
 COPY packages ./packages
 COPY apps/web ./apps/web
 ARG NEXT_PUBLIC_API_URL

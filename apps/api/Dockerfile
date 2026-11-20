@@ -10,6 +10,7 @@ RUN pnpm install --frozen-lockfile --filter @drawbattle/api... --filter @drawbat
 
 FROM base AS build
 COPY --from=deps /app ./
+COPY tsconfig.json ./
 COPY packages ./packages
 COPY apps/api ./apps/api
 RUN pnpm --filter @drawbattle/shared build && pnpm --filter @drawbattle/api build && pnpm --filter @drawbattle/api exec prisma generate
