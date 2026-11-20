@@ -8,6 +8,37 @@ import { normalizeGuess, validateGuess } from '@drawbattle/shared';
 const VIETNAM_TIME_ZONE = 'Asia/Ho_Chi_Minh';
 const MAX_DAILY_ATTEMPTS = 10;
 const DAILY_ATTEMPT_COOLDOWN_MS = 1000;
+// Bound the candidate scan: strokes are stored as JSON and Postgres cannot
+// cheaply express "every stroke has at least two points" in a Prisma filter.
+const DAILY_REPLAY_CANDIDATE_LIMIT = 50;
+
+/** A stroke with fewer than two points cannot draw a line and renders as a blank replay. */
+export function hasValidReplayStrokes(strokes: unknown): boolean {
+  if (!Array.isArray(strokes) || strokes.length === 0) return false;
+  return strokes.every(stroke => {
+    if (!stroke || typeof stroke !== 'object') return false;
+    const points = (stroke as { points?: unknown }).points;
+    return Array.isArray(points) && points.length >= 2;
+  });
+}
+
+interface DailyReplaySource {
+  strokes: unknown;
+  turn: { round: { match: { room: { visibility: string } } } } | null;
+}
+
+/**
+ * P0 DAILY-PRIVACY: Daily may only reuse a drawing from a PUBLIC match room.
+ * Quick Challenge drawings have no room and no explicit "daily eligible"
+ * flag, so they are deliberately excluded here as well.
+ */
+function isEligibleDailyReplay(replay: DailyReplaySource | null): boolean {
+  return Boolean(
+    replay &&
+    hasValidReplayStrokes(replay.strokes) &&
+    replay.turn?.round?.match?.room?.visibility === 'PUBLIC',
+  );
+}
 
 /**
  * DAILY-06: the daily boundary must be midnight in Asia/Ho_Chi_Minh (UTC+7),
@@ -54,30 +85,47 @@ export class DailyService {
       });
       if (existing) return;
 
-      // The daily must show a real drawing. Prefer a word that already has a
-      // replay (created via community challenges / finished turns) and link
-      // that replay to today's challenge so every player sees the same source
-      // image. Fall back to any active word when none exist, and let the UI
-      // show a clear "no replay yet" message instead of a blank canvas.
-      const replayBackedWord = await tx.replay.findFirst({
-        where: {
-          dailyId: null,
-          OR: [
-            { turn: { is: { word: { is: { active: true } } } } },
-            { challenge: { is: { word: { is: { active: true } } } } },
-          ],
-        },
-        orderBy: { createdAt: 'desc' },
-        select: {
-          id: true,
-          turn: { select: { wordId: true } },
-          challenge: { select: { wordId: true } },
-        },
-      });
-      const replayWordId = replayBackedWord?.turn?.wordId ?? replayBackedWord?.challenge?.wordId;
-      const word = replayWordId
+      // P0 DAILY-PRIVACY: only replays from PUBLIC match rooms may be reused
+      // as the shared daily drawing. Private/unlisted room drawings and Quick
+      // Challenge drawings (no room, no explicit daily-eligibility flag) must
+      // never surface here. Recent candidates are scanned in bounded batches
+      // because the ">= 2 points per stroke" check runs on the JSON payload.
+      let replayBackedWord: { id: string; wordId: string } | null = null;
+      let cursor: string | undefined;
+      outer: for (let batch = 0; batch < 20; batch++) {
+        const candidates = await tx.replay.findMany({
+          where: {
+            dailyId: null,
+            turnId: { not: null },
+            turn: { is: { word: { is: { active: true } } } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: DAILY_REPLAY_CANDIDATE_LIMIT,
+          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+          select: {
+            id: true,
+            strokes: true,
+            turn: {
+              select: {
+                wordId: true,
+                round: { select: { match: { select: { room: { select: { visibility: true } } } } } },
+              },
+            },
+          },
+        });
+        if (candidates.length === 0) break;
+        for (const candidate of candidates) {
+          cursor = candidate.id;
+          if (isEligibleDailyReplay(candidate)) {
+            replayBackedWord = { id: candidate.id, wordId: candidate.turn!.wordId };
+            break outer;
+          }
+        }
+      }
+
+      const word = replayBackedWord
         ? await tx.word.findFirst({
-            where: { id: replayWordId, active: true },
+            where: { id: replayBackedWord.wordId, active: true },
             select: { id: true },
           })
         : await tx.word.findFirst({
@@ -90,7 +138,7 @@ export class DailyService {
       const challenge = await tx.dailyChallenge.create({
         data: { date: today, wordId: word.id },
       });
-      if (replayBackedWord && replayWordId === word.id) {
+      if (replayBackedWord && replayBackedWord.wordId === word.id) {
         // replayId is unique; updateMany keeps a concurrent claim from
         // throwing after the daily row has already been persisted.
         await tx.replay.updateMany({
@@ -165,14 +213,16 @@ export class DailyService {
           : null,
       },
       // DAILY-07: expose only the drawing data the UI needs; never spread
-      // internal replay columns into a public response.
-      hasReplay: Boolean(challenge.replay),
-      replay: challenge.replay
-        ? {
-            strokes: challenge.replay.strokes,
-            durationMs: challenge.replay.durationMs,
-          }
-        : null,
+      // internal replay columns into a public response. Re-check eligibility
+      // so a replay linked before the PUBLIC-room rule landed is never served.
+      hasReplay: isEligibleDailyReplay(challenge.replay),
+      replay:
+        challenge.replay && isEligibleDailyReplay(challenge.replay)
+          ? {
+              strokes: challenge.replay.strokes,
+              durationMs: challenge.replay.durationMs,
+            }
+          : null,
       answerCanonical,
       // Explicit sanitisation even if a caller/mock supplies a richer attempt.
       userAttempt: userAttempt
@@ -192,7 +242,17 @@ export class DailyService {
       select: {
         id: true,
         date: true,
-        replay: true,
+        replay: {
+          select: {
+            strokes: true,
+            durationMs: true,
+            turn: {
+              select: {
+                round: { select: { match: { select: { room: { select: { visibility: true } } } } } },
+              },
+            },
+          },
+        },
         word: {
           select: {
             id: true,

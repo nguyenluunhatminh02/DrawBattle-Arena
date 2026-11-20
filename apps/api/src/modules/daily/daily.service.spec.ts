@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { DailyService, getVietnamToday } from './daily.service';
+import { DailyService, getVietnamToday, hasValidReplayStrokes } from './daily.service';
 
 // Jest in this repo does not transform @nestjs/schedule's ESM build; the
 // decorator is irrelevant to these pure service tests.
@@ -36,7 +36,12 @@ function createPrismaMock() {
   const challenge = {
     id: 'd1',
     date: today,
-    replay: { id: 'r1', strokes: replayStrokes, durationMs: 3000, dailyId: 'd1' },
+    replay: {
+      id: 'r1',
+      strokes: replayStrokes,
+      durationMs: 3000,
+      turn: { round: { match: { room: { visibility: 'PUBLIC' } } } },
+    },
     word: {
       id: 'w1',
       canonical: 'mèo',
@@ -51,6 +56,7 @@ function createPrismaMock() {
       create: jest.fn().mockResolvedValue(challenge),
     },
     replay: {
+      findMany: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn().mockResolvedValue({
         id: 'r1',
         turn: null,
@@ -108,6 +114,7 @@ describe('DailyService hardening', () => {
           { strokeId: 's1', points: [{ x: 0, y: 0 }, { x: 1, y: 1 }], color: '#000000', width: 4 },
         ],
         durationMs: 3000,
+        turn: { round: { match: { room: { visibility: 'PUBLIC' } } } },
       },
       word: { id: 'w1', difficulty: 'EASY', category: { name: 'Động vật' } },
     });
@@ -121,6 +128,30 @@ describe('DailyService hardening', () => {
     expect(JSON.stringify(info)).not.toContain('dailyId');
   });
 
+  it('never serves a replay from a PRIVATE room even if linked to daily', async () => {
+    prisma.dailyChallenge.findUnique.mockResolvedValue({
+      id: 'd1',
+      date: getVietnamToday(),
+      replay: {
+        id: 'private-r',
+        strokes: [{ strokeId: 's1', points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }],
+        durationMs: 3000,
+        turn: { round: { match: { room: { visibility: 'PRIVATE' } } } },
+      },
+      word: { id: 'w1', difficulty: 'EASY', category: null },
+    });
+
+    const info = await service.getTodaysChallenge('u1');
+    expect(info.hasReplay).toBe(false);
+    expect(info.replay).toBeNull();
+  });
+
+  it('never includes blank or single-point strokes', async () => {
+    expect(hasValidReplayStrokes([])).toBe(false);
+    expect(hasValidReplayStrokes([{ points: [{ x: 0, y: 0 }] }])).toBe(false);
+    expect(hasValidReplayStrokes([{ points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }])).toBe(true);
+  });
+
   it('selects a word that already has a replay when generating the daily', async () => {
     prisma.dailyChallenge.findUnique
       .mockResolvedValueOnce(null)
@@ -131,30 +162,27 @@ describe('DailyService hardening', () => {
         replay: null,
         word: { id: 'w1', difficulty: 'EASY', category: null },
       });
-    prisma.replay.findFirst.mockResolvedValue({
+    prisma.replay.findMany.mockResolvedValue([{
       id: 'r1',
-      turn: null,
-      challenge: { wordId: 'w1' },
-    });
+      strokes: [{ strokeId: 's1', points: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.8 }] }],
+      turn: {
+        wordId: 'w1',
+        round: { match: { room: { visibility: 'PUBLIC' } } },
+      },
+    }]);
     prisma.word.findFirst.mockResolvedValue({ id: 'w1' });
 
     await service.getTodaysChallenge();
 
-    expect(prisma.replay.findFirst).toHaveBeenCalledWith({
+    expect(prisma.replay.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         dailyId: null,
-        OR: [
-          { turn: { is: { word: { is: { active: true } } } } },
-          { challenge: { is: { word: { is: { active: true } } } } },
-        ],
+        turnId: { not: null },
+        turn: { is: { word: { is: { active: true } } } },
       },
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        turn: { select: { wordId: true } },
-        challenge: { select: { wordId: true } },
-      },
-    });
+      take: 50,
+    }));
     expect(prisma.dailyChallenge.create).toHaveBeenCalledWith({
       data: { date: getVietnamToday(), wordId: 'w1' },
     });
@@ -174,7 +202,7 @@ describe('DailyService hardening', () => {
         replay: null,
         word: { id: 'w1', difficulty: 'EASY', category: null },
       });
-    prisma.replay.findFirst.mockResolvedValue(null);
+    prisma.replay.findMany.mockResolvedValue([]);
 
     await service.getTodaysChallenge();
 
