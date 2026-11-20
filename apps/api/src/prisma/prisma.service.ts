@@ -39,16 +39,18 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   renderJob!: OptionalTables['renderJob'];
   funnelEvent!: OptionalTables['funnelEvent'];
 
-  /** Safe feature detection: optional delegates throw if the table is absent. */
+  /**
+   * Safe feature detection for the optional tables. A declared class field can
+   * exist as `undefined`, so presence alone is not enough: require the actual
+   * Prisma delegate methods before taking the durable path.
+   */
   hasOptionalTable(name: 'renderJob' | 'funnelEvent'): boolean {
-    const client = this as unknown as Record<string, unknown>;
-    if (!(name in client)) return false;
-    try {
-      void client[name];
-      return true;
-    } catch {
-      return false;
-    }
+    const delegate = (this as unknown as Record<string, unknown>)[name] as
+      | Record<string, unknown>
+      | undefined;
+    if (!delegate) return false;
+    const requiredMethod = name === 'renderJob' ? 'findUnique' : 'createMany';
+    return typeof delegate[requiredMethod] === 'function';
   }
 
   async onModuleInit() {
