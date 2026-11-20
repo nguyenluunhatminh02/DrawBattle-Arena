@@ -35,6 +35,39 @@ describe('RoomSettingsDto (P1-03)', () => {
     expect((await errorsFor({ password: 'x'.repeat(65) }))[0].children?.map(c => c.property)).toContain('password');
   });
 
+  it('rejects explicit null for every optional setting', async () => {
+    const errors = await errorsFor({
+      mode: null,
+      maxPlayers: null,
+      rounds: null,
+      turnDuration: null,
+      difficulty: null,
+      enableHints: null,
+      password: null,
+      category: null,
+    });
+    const fields = errors[0].children?.map(c => c.property) ?? [];
+    expect(fields).toEqual(
+      expect.arrayContaining([
+        'mode',
+        'maxPlayers',
+        'rounds',
+        'turnDuration',
+        'difficulty',
+        'enableHints',
+        'password',
+        'category',
+      ]),
+    );
+  });
+
+  it('still accepts omitted settings and null settings object', async () => {
+    expect(await validate(plainToInstance(CreateRoomDto, { settings: {} }))).toHaveLength(0);
+    expect(await validate(plainToInstance(CreateRoomDto, { settings: null }))).toHaveLength(
+      0,
+    );
+  });
+
   it('accepts a valid room settings payload', async () => {
     const dto = plainToInstance(RoomSettingsDto, {
       mode: 'CLASSIC',

@@ -1,10 +1,12 @@
-import { Injectable, BadRequestException, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { JwtService } from '../auth/jwt.service';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class AccountService {
+  private readonly logger = new Logger(AccountService.name);
+
   constructor(
     private prisma: PrismaService,
     private jwtService: JwtService,
@@ -69,24 +71,57 @@ export class AccountService {
     let tokenPayload: { sub: string };
     try {
       tokenPayload = this.jwtService.verify(guestToken);
-    } catch {
+    } catch (err) {
+      // Never log the token itself; only the failure reason is safe to emit.
+      this.logger.warn(
+        `Guest token verification failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       throw new UnauthorizedException('Invalid guest token');
     }
     if (tokenPayload.sub !== guestSessionId) {
+      this.logger.warn('Guest token subject does not match requested session');
       throw new ForbiddenException('Token does not match guest session');
     }
 
-    await this.prisma.guestSession.update({
-      where: { id: guestSessionId },
-      data: { userId },
-    });
+    // Linking is atomic: the guest session is marked linked and expired so
+    // validateGuestToken rejects it immediately, durable identities are
+    // migrated to the user, and no partial state survives a DB error.
+    await this.prisma.$transaction(async tx => {
+      await tx.guestSession.update({
+        where: { id: guestSessionId },
+        data: { userId, expiresAt: new Date(0) },
+      });
 
-    try {
-      await this.prisma.roomPlayer.updateMany({
+      await tx.roomPlayer.updateMany({
         where: { guestSessionId, userId: null },
         data: { userId },
       });
-    } catch {}
+
+      // Migrate room bans to the user identity before clearing the guest
+      // identity, otherwise the ban would silently disappear on linking.
+      const guestBans = await tx.roomBan.findMany({
+        where: { guestSessionId },
+        select: { id: true, roomId: true, userId: true },
+      });
+      for (const ban of guestBans) {
+        if (ban.userId === userId) {
+          await tx.roomBan.update({
+            where: { id: ban.id },
+            data: { guestSessionId: null },
+          });
+          continue;
+        }
+        if (ban.userId) {
+          // The user is already banned in this room; the guest ban is redundant.
+          await tx.roomBan.delete({ where: { id: ban.id } });
+          continue;
+        }
+        await tx.roomBan.update({
+          where: { id: ban.id },
+          data: { userId, guestSessionId: null },
+        });
+      }
+    });
 
     return { success: true };
   }

@@ -18,6 +18,13 @@ import { validateStrokeCoordinates } from '@drawbattle/shared';
 import type { StrokeChunk } from '@drawbattle/shared';
 import { containsProfanity } from '../../common/profanity';
 
+interface DisconnectTimer {
+  timer: NodeJS.Timeout;
+  roomId: string;
+  playerId: string;
+  socketId: string;
+}
+
 interface AuthedSocket extends Socket {
   data: {
     identityType?: 'guest' | 'user';
@@ -44,7 +51,7 @@ export class GameSocketGateway
 {
   private readonly logger = new Logger(GameSocketGateway.name);
   private readonly roomSockets = new Map<string, Map<string, AuthedSocket>>();
-  private readonly disconnectTimers = new Map<string, NodeJS.Timeout>();
+  private readonly disconnectTimers = new Map<string, DisconnectTimer>();
   private readonly kickedSessions = new Map<string, Set<string>>();
   private readonly rateLimits = new Map<string, { count: number; resetAt: number }>();
   private rateLimitCleanupInterval: NodeJS.Timeout | null = null;
@@ -111,6 +118,29 @@ export class GameSocketGateway
     socket.disconnect();
   }
 
+  /**
+   * A reconnect may install a new timer for the same player while an older
+   * socket is still finishing its disconnect. Only the matching room/player/
+   * socket identity may clear a timer; otherwise a stale duplicate socket
+   * would cancel the live socket's grace period.
+   */
+  private clearDisconnectTimer(
+    roomId: string,
+    playerId: string,
+    socketId?: string,
+  ): boolean {
+    const current = this.disconnectTimers.get(playerId);
+    if (!current || current.roomId !== roomId || current.playerId !== playerId) {
+      return false;
+    }
+    if (socketId !== undefined && current.socketId !== socketId) {
+      return false;
+    }
+    clearTimeout(current.timer);
+    this.disconnectTimers.delete(playerId);
+    return true;
+  }
+
   handleDisconnect(socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
@@ -125,7 +155,13 @@ export class GameSocketGateway
     if (roomId && playerId) {
       const roomMap = this.roomSockets.get(roomId);
       const currentSocket = roomMap?.get(playerId);
-      if (currentSocket && currentSocket.id !== socket.id) {
+      const pendingTimer = this.disconnectTimers.get(playerId);
+      // A stale duplicate socket must not replace or cancel the timer owned
+      // by the live socket for this player.
+      if (
+        (currentSocket && currentSocket.id !== socket.id) ||
+        (pendingTimer && pendingTimer.socketId !== socket.id)
+      ) {
         return;
       }
 
@@ -153,17 +189,30 @@ export class GameSocketGateway
         // Re-check after the await: a reconnect may have installed a new
         // socket for this playerId while leaveRoom was in flight.
         const latestMapNow = this.roomSockets.get(roomId);
-        if (latestMapNow?.has(playerId)) {
+        if (
+          latestMapNow?.has(playerId) ||
+          this.disconnectTimers.get(playerId) !== current
+        ) {
           return;
         }
         this.game.removePlayer(roomId, playerId);
         this.server.to(roomId).emit('room:playerLeft', playerId);
         this.broadcastRoomUpdate(roomId);
-        this.disconnectTimers.delete(playerId);
+        if (current === this.disconnectTimers.get(playerId)) {
+          this.disconnectTimers.delete(playerId);
+        }
         socket.data.roomId = undefined;
         socket.data.playerId = undefined;
       }, 15_000);
-      this.disconnectTimers.set(playerId, timer);
+      // A newer socket for this player supersedes any older disconnect timer.
+      this.clearDisconnectTimer(roomId, playerId);
+      const current: DisconnectTimer = {
+        timer,
+        roomId,
+        playerId,
+        socketId: socket.id,
+      };
+      this.disconnectTimers.set(playerId, current);
     }
   }
 
@@ -229,11 +278,9 @@ export class GameSocketGateway
       socket.data.roomCode = roomCode;
       // Do not join the socket room until capacity is confirmed: on ROOM_FULL
       // the socket must not be an active room member.
-      const existingTimer = this.disconnectTimers.get(joined.playerId);
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-        this.disconnectTimers.delete(joined.playerId);
-      }
+      // The timer belongs to this player's reconnect: clear it only after
+      // joinRoom confirms the identity that owns the slot.
+      this.clearDisconnectTimer(joined.roomId, joined.playerId);
 
       const existingSnapshot = this.game.getSnapshot(joined.roomId);
       if (!existingSnapshot) {
@@ -339,11 +386,7 @@ export class GameSocketGateway
     const playerId = socket.data.playerId;
     if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
 
-    const timer = this.disconnectTimers.get(playerId);
-    if (timer) {
-      clearTimeout(timer);
-      this.disconnectTimers.delete(playerId);
-    }
+    this.clearDisconnectTimer(roomId, playerId, socket.id);
 
     try {
       await this.roomService.leaveRoom(roomId, playerId);
@@ -575,9 +618,15 @@ export class GameSocketGateway
     switch (data.action) {
       case 'kick': {
         const targetSocket = this.roomSockets.get(roomId)?.get(data.targetId);
-        // Authorize the kick in game state before any durable write. A forged
-        // or stale hostAction must never create a DB ban.
-        if (!this.game.kickPlayer(roomId, playerId, data.targetId)) {
+        // Authorize the kick without mutating in-memory state first. A forged
+        // or stale hostAction must never create a DB ban, and the target must
+        // remain in the room until the ban is durably persisted.
+        const snapshot = this.game.getSnapshot(roomId);
+        if (
+          !snapshot?.players.some(p => p.id === data.targetId) ||
+          !this.game.isHost(roomId, playerId) ||
+          playerId === data.targetId
+        ) {
           socket.emit('error', 'KICK_FAILED', 'Cannot kick player');
           break;
         }
@@ -602,11 +651,10 @@ export class GameSocketGateway
         if (banned.guestSessionId || banned.userId) {
           this.kickedSessions.set(roomId, denylist);
         }
-        const timer = this.disconnectTimers.get(data.targetId);
-        if (timer) {
-          clearTimeout(timer);
-          this.disconnectTimers.delete(data.targetId);
-        }
+        // The ban is durable, so it is now safe to remove the player from the
+        // in-memory room. This also emits room:playerKicked to the target.
+        this.game.kickPlayer(roomId, playerId, data.targetId);
+        this.clearDisconnectTimer(roomId, data.targetId);
         this.roomSockets.get(roomId)?.delete(data.targetId);
         if (targetSocket) {
           targetSocket.leave(roomId);
@@ -729,7 +777,7 @@ export class GameSocketGateway
       clearInterval(this.rateLimitCleanupInterval);
       this.rateLimitCleanupInterval = null;
     }
-    for (const timer of this.disconnectTimers.values()) clearTimeout(timer);
+    for (const { timer } of this.disconnectTimers.values()) clearTimeout(timer);
     this.disconnectTimers.clear();
     this.rateLimits.clear();
     this.roomSockets.clear();

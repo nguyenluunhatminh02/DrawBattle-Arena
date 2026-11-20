@@ -2,51 +2,57 @@ import {
   IsBoolean,
   IsEnum,
   IsInt,
-  IsOptional,
   IsString,
   Max,
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
+  ValidationOptions,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export const GAME_MODES = ['CLASSIC', 'DUEL', 'SPEED', 'TEAM'] as const;
 export const ROOM_DIFFICULTIES = ['EASY', 'MEDIUM', 'HARD', 'MIXED'] as const;
 
+/** Like @IsOptional, but explicit null is validated (and rejected) instead of skipped. */
+function IsOptionalButNotNull(options?: ValidationOptions) {
+  return ValidateIf((_object, value) => value !== undefined, options);
+}
+
 export class RoomSettingsDto {
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsEnum(GAME_MODES)
   mode?: (typeof GAME_MODES)[number];
 
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsInt()
   @Min(2)
   @Max(12)
   maxPlayers?: number;
 
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsInt()
   @Min(1)
   @Max(10)
   rounds?: number;
 
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsInt()
   @Min(15)
   @Max(300)
   turnDuration?: number;
 
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsEnum(ROOM_DIFFICULTIES)
   difficulty?: (typeof ROOM_DIFFICULTIES)[number];
 
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsBoolean()
   enableHints?: boolean;
 
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsString()
   @MinLength(1)
   @MaxLength(64)
@@ -54,7 +60,7 @@ export class RoomSettingsDto {
 
   // Category/language/enableGuests are accepted but untrusted strings/flags;
   // keep them bounded without changing existing defaults.
-  @IsOptional()
+  @IsOptionalButNotNull()
   @IsString()
   @MaxLength(64)
   category?: string;
@@ -62,7 +68,7 @@ export class RoomSettingsDto {
 
 /** Body accepted by POST /rooms. Unknown fields are stripped by the global pipe. */
 export class CreateRoomDto {
-  @IsOptional()
+  @ValidateIf((_object, value) => value !== undefined && value !== null)
   @ValidateNested()
   @Type(() => RoomSettingsDto)
   settings?: RoomSettingsDto;
