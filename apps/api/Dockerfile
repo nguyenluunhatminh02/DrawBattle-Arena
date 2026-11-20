@@ -1,11 +1,12 @@
-FROM node:20-alpine AS base
+FROM node:20-bookworm-slim AS base
 RUN corepack enable && corepack prepare pnpm@9 --activate
 WORKDIR /app
 
 FROM base AS deps
-RUN apk add --no-cache \
-  python3 make g++ pkgconf \
-  cairo-dev pango-dev jpeg-dev giflib-dev librsvg-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  python3 make g++ pkg-config \
+  libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
+  && rm -rf /var/lib/apt/lists/*
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY packages/shared/package.json packages/shared/
 COPY apps/api/package.json apps/api/
@@ -20,8 +21,10 @@ RUN pnpm --filter @drawbattle/api exec prisma generate && \
   pnpm --filter @drawbattle/shared build && \
   pnpm --filter @drawbattle/api build
 
-FROM node:20-alpine AS runtime
-RUN apk add --no-cache cairo pango jpeg giflib librsvg
+FROM node:20-bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  libcairo2 libpango-1.0-0 libjpeg62-turbo libgif7 librsvg2-2 \
+  && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@9 --activate
 WORKDIR /app
 ENV NODE_ENV=production
