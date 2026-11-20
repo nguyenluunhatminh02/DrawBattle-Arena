@@ -156,7 +156,7 @@ JWT_SECRET=$(openssl rand -hex 32) docker compose up --build
 
 ## Architecture decisions
 
-1. **In-memory room state + Redis ownership routing** — simple per-instance state machine, Redis tracks which instance owns each room for multi-instance scaling
+1. **In-memory room state + Redis Socket.IO adapter** — authoritative game state is process-local; the Redis adapter only fans out Socket.IO events. Rooms are not migrated between API instances, so multi-instance scaling requires sticky room routing.
 2. **Shared package with dual ESM/CJS output** — tsup builds both `index.mjs` and `index.js` from one source
 3. **Server-authoritative scoring with idempotent correct-guess** — prevents duplicate points on retransmit
 4. **Vector strokes, not raster** — bandwidth-friendly, replayable, resolution-independent
