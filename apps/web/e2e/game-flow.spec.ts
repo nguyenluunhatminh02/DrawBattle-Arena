@@ -151,8 +151,14 @@ test.describe('Live Room Full Flow', () => {
 });
 
 test.describe('Quick Challenge', () => {
-  test('create challenge, finalize, guess correctly', async ({ page }) => {
+  test('create challenge, finalize, guess correctly', async ({ browser }) => {
     test.setTimeout(120000);
+    // Keep this test's guest-session throttle bucket separate from other
+    // parallel tests that also create guest sessions on localhost.
+    const context = await browser.newContext({
+      extraHTTPHeaders: { 'X-Forwarded-For': '203.0.113.80' },
+    });
+    const page = await context.newPage();
     await page.goto(WEB);
     await page.waitForSelector('main[data-ready="true"]', { timeout: 15000 });
     await page.getByPlaceholder('Nhập tên của bạn...').fill('Challenger');
@@ -190,7 +196,8 @@ test.describe('Quick Challenge', () => {
 
   test('fresh visitor can bootstrap identity and guess on a shared link', async ({ browser }) => {
     test.setTimeout(120000);
-    const ctx = await browser.newContext();
+    // Isolate the guest-creation throttle bucket from other parallel tests.
+    const ctx = await browser.newContext({ extraHTTPHeaders: { 'X-Forwarded-For': '203.0.113.81' } });
     const author = await setupPlayer(ctx, 'ChallengeAuthor');
     await author.goto(WEB);
     await author.waitForSelector('main[data-ready="true"]', { timeout: 15000 });
@@ -232,8 +239,12 @@ test.describe('Quick Challenge', () => {
     const visitor = await freshCtx.newPage();
     await visitor.goto(shareText!);
     await expect(visitor.getByPlaceholder('Nhập đáp án...')).toBeVisible({ timeout: 20000 });
+    const guessButton = visitor.getByRole('button', { name: 'Đoán' });
     await visitor.getByPlaceholder('Nhập đáp án...').fill(word);
-    await visitor.getByRole('button', { name: 'Đoán' }).click();
+    // Guest bootstrap is asynchronous; the button stays disabled until both
+    // the answer is present and the guest token has been provisioned.
+    await expect(guessButton).toBeEnabled({ timeout: 20000 });
+    await guessButton.click();
     await expect(visitor.getByText('Chính xác!')).toBeVisible({ timeout: 15000 });
 
     await freshCtx.close();

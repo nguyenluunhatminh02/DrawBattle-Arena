@@ -45,6 +45,8 @@ export default function ChallengePlayPage() {
   const [guessing, setGuessing] = useState(false);
   const [guessError, setGuessError] = useState<string | null>(null);
   const [answerCanonical, setAnswerCanonical] = useState<string | null>(null);
+  // Fresh visitors need a guest identity before a guess can be attributed.
+  const identityReady = Boolean(activeToken);
 
   // A fresh visitor who opens a shared challenge link has no identity yet.
   // Provision a guest session so guesses are attributed to them instead of
@@ -372,14 +374,14 @@ export default function ChallengePlayPage() {
                   value={answer}
                   onChange={e => setAnswer(e.target.value)}
                   placeholder="Nhập đáp án..."
-                  disabled={guessing}
+                  disabled={guessing || !identityReady}
                   autoComplete="off"
                   className="min-h-11 flex-1 border-panel-border/40 bg-arena-950/60 text-on-arena placeholder:text-muted-on-arena"
                 />
                 <Button
                   type="submit"
                   className="min-h-11 w-full sm:w-auto"
-                  disabled={!answer.trim() || guessing}
+                  disabled={!answer.trim() || guessing || !identityReady}
                   aria-busy={guessing}
                 >
                   {guessing ? 'Đang gửi...' : 'Đoán'}

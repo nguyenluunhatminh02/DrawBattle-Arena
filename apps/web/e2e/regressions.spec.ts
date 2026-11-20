@@ -1,7 +1,15 @@
-import { test, expect, BrowserContext, Page } from '@playwright/test';
+import { test, expect, Browser, BrowserContext, Page } from '@playwright/test';
 
 const WEB = process.env.E2E_WEB_URL ?? 'http://localhost:3002';
 const API = process.env.E2E_API_URL ?? 'http://localhost:3001';
+
+// Each browser-driven test gets its own forwarded-IP bucket so parallel
+// guest creation never exhausts the shared localhost throttle bucket.
+let nextIsolatedIp = 1;
+function isolatedContext(browser: Browser, options: Record<string, unknown> = {}) {
+  const ip = `198.51.101.${nextIsolatedIp++}`;
+  return browser.newContext({ ...options, extraHTTPHeaders: { 'X-Forwarded-For': ip } });
+}
 
 async function setupPlayer(context: BrowserContext, nickname: string): Promise<Page> {
   const page = await context.newPage();
@@ -120,11 +128,11 @@ test.describe('E2E regression matrix', () => {
   });
 
   test('E2E-05 QR deep link auto-joins without duplicate identity', async ({ browser }) => {
-    const hostCtx = await browser.newContext();
+    const hostCtx = await isolatedContext(browser);
     const host = await setupPlayer(hostCtx, 'LinkHost');
     const code = await createRoom(host);
 
-    const visitorCtx = await browser.newContext();
+    const visitorCtx = await isolatedContext(browser);
     const visitor = await visitorCtx.newPage();
     await visitor.goto(`${WEB}/room/${code}`);
     await visitor.waitForFunction(() => document.body.innerText.includes('Phòng chờ'), null, {
@@ -145,8 +153,8 @@ test.describe('E2E regression matrix', () => {
   });
 
   test('E2E-06 ready gate: host cannot start before guest is ready', async ({ browser }) => {
-    const hostCtx = await browser.newContext();
-    const guestCtx = await browser.newContext();
+    const hostCtx = await isolatedContext(browser);
+    const guestCtx = await isolatedContext(browser);
     const host = await setupPlayer(hostCtx, 'ReadyHost');
     await createRoom(host);
     const guest = await setupPlayer(guestCtx, 'ReadyGuest');
@@ -162,8 +170,8 @@ test.describe('E2E regression matrix', () => {
   });
 
   test('E2E-07 guest cannot draw for the active drawer', async ({ browser }) => {
-    const hostCtx = await browser.newContext();
-    const guestCtx = await browser.newContext();
+    const hostCtx = await isolatedContext(browser);
+    const guestCtx = await isolatedContext(browser);
     const host = await setupPlayer(hostCtx, 'DrawHost');
     await createRoom(host);
     const guest = await setupPlayer(guestCtx, 'DrawGuest');
@@ -194,8 +202,8 @@ test.describe('E2E regression matrix', () => {
   });
 
   test('E2E-08 secret word stays hidden from guessers until reveal', async ({ browser }) => {
-    const hostCtx = await browser.newContext();
-    const guestCtx = await browser.newContext();
+    const hostCtx = await isolatedContext(browser);
+    const guestCtx = await isolatedContext(browser);
     const host = await setupPlayer(hostCtx, 'WordHost');
     await createRoom(host);
     const guest = await setupPlayer(guestCtx, 'WordGuest');
