@@ -1,11 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { AppShell } from '@/components/layout/AppShell';
+import { PageHeader } from '@/components/layout/PageHeader';
 import { api } from '@/lib/api';
 import { useGameStore } from '@/lib/store';
 import type { StrokeChunk } from '@drawbattle/shared';
@@ -28,8 +30,10 @@ export default function ChallengePlayPage() {
   const [replay, setReplay] = useState<ReplayStroke[] | null>(null);
   const [durationMs, setDurationMs] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [expired, setExpired] = useState(false);
   const [noReplay, setNoReplay] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [answer, setAnswer] = useState('');
   const [attemptNo, setAttemptNo] = useState(0);
@@ -39,6 +43,7 @@ export default function ChallengePlayPage() {
 
   useEffect(() => {
     api.getChallengeInfo(id, player?.token).then(info => {
+      setLoading(false);
       if (info.status === 'EXPIRED') {
         setExpired(true);
         return;
@@ -52,7 +57,8 @@ export default function ChallengePlayPage() {
       setRemaining(info.maxAttempts - info.attemptCount);
       setLoaded(true);
     }).catch(() => {
-      setExpired(true);
+      setLoading(false);
+      setLoadError('Không tải được thách thức. Vui lòng kiểm tra liên kết và thử lại.');
     });
   }, [id]);
 
@@ -154,94 +160,196 @@ export default function ChallengePlayPage() {
     setGuessing(false);
   }
 
+  function StateCard({
+    title,
+    description,
+    tone = 'neutral',
+  }: {
+    title: string;
+    description?: string;
+    tone?: 'neutral' | 'warning' | 'success';
+  }) {
+    const toneClass =
+      tone === 'success'
+        ? 'bg-success/15 text-success ring-success/40'
+        : tone === 'warning'
+          ? 'bg-warning/15 text-warning ring-warning/40'
+          : 'bg-panel-border/20 text-muted-on-arena ring-panel-border/30';
+
+    return (
+      <AppShell>
+        <PageHeader title="Đấu Trường Nét" subtitle="Thách thức tranh" />
+        <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-6">
+          <Card className="border-panel-border/30 bg-panel/90 text-on-arena shadow-panel">
+            <CardContent className="space-y-4 p-5 text-center sm:p-6">
+              <div className={`mx-auto flex h-14 w-14 items-center justify-center rounded-2xl ring-1 ${toneClass}`} aria-hidden="true">
+                <span className="text-2xl">{tone === 'success' ? '✓' : tone === 'warning' ? '!' : '✎'}</span>
+              </div>
+              <div className="space-y-1">
+                <h2 className="text-xl font-bold sm:text-2xl">{title}</h2>
+                {description && <p className="text-sm text-muted-on-arena">{description}</p>}
+              </div>
+              <Link
+                href="/"
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-panel-border/40 px-4 text-sm font-medium text-on-arena transition-colors hover:bg-panel/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border"
+                aria-label="← Về trang chủ"
+              >
+                ← Về trang chủ
+              </Link>
+            </CardContent>
+          </Card>
+        </main>
+      </AppShell>
+    );
+  }
+
+  if (loading) {
+    return (
+      <AppShell>
+        <PageHeader title="Đấu Trường Nét" subtitle="Đang tải thách thức" />
+        <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-6">
+          <Card className="border-panel-border/30 bg-panel/90 text-on-arena shadow-panel" role="status" aria-live="polite">
+            <CardContent className="space-y-4 p-5 text-center sm:p-6">
+              <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-panel-border/30 border-t-on-arena" aria-hidden="true" />
+              <h2 className="text-lg font-semibold">Đang tải thách thức...</h2>
+              <p className="text-sm text-muted-on-arena">Đang chuẩn bị bức tranh cho bạn.</p>
+            </CardContent>
+          </Card>
+        </main>
+      </AppShell>
+    );
+  }
+
+  if (loadError) {
+    return <StateCard title="Không tìm thấy thách thức" description={loadError} tone="warning" />;
+  }
+
   if (expired) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-4">
-        <Card className="w-full max-w-md">
-          <CardContent className="pt-6 text-center space-y-4">
-            <h2 className="text-2xl font-bold">Challenge đã hết hạn</h2>
-            <Button onClick={() => router.push('/')}>Về trang chủ</Button>
-          </CardContent>
-        </Card>
-      </main>
+      <StateCard
+        title="Thách thức đã hết hạn"
+        description="Liên kết này không còn hiệu lực. Hãy tạo thách thức mới để tiếp tục chơi."
+        tone="warning"
+      />
     );
   }
 
   if (noReplay) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-4">
-        <Card className="w-full max-w-md">
-          <CardContent className="pt-6 text-center space-y-4">
-            <h2 className="text-2xl font-bold">Tranh chưa được vẽ</h2>
-            <p className="text-muted-foreground">Người tạo chưa hoàn thành bức tranh.</p>
-            <Button onClick={() => router.push('/')}>Về trang chủ</Button>
-          </CardContent>
-        </Card>
-      </main>
+      <StateCard
+        title="Chưa có bức tranh để đoán"
+        description="Người tạo chưa hoàn thành bức tranh hoặc thách thức chưa được lưu."
+      />
     );
   }
 
-  return (
-    <main className="min-h-screen flex flex-col items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50 gap-4">
-      <div className="w-full max-w-lg">
-        <div className="flex items-center justify-between mb-2">
-          <h1 className="font-bold text-primary text-xl">DrawBattle</h1>
-          <Badge>Lượt đoán còn: {remaining}</Badge>
-        </div>
-        <div ref={containerRef} className="w-full aspect-[16/10] bg-white rounded-lg overflow-hidden border">
-          <canvas ref={canvasRef} className="w-full h-full" />
-        </div>
-      </div>
+  const solved = Boolean(result?.correct);
+  const outOfAttempts = !solved && remaining <= 0 && attemptNo > 0;
+  const finished = solved || outOfAttempts;
 
-      {result && (result.correct || remaining === 0) ? (
-        <Card className="w-full max-w-lg">
-          <CardContent className="pt-6 space-y-4 text-center">
-            {result.correct ? (
-              <>
-                <Badge className="bg-green-500 text-white text-lg px-4 py-1">Chính xác!</Badge>
-                <p className="text-2xl font-bold text-primary">{result.answer}</p>
-              </>
-            ) : (
-              <>
-                <Badge variant="destructive" className="text-lg px-4 py-1">Sai rồi!</Badge>
-                {result.answer && (
-                  <p className="text-lg">Đáp án: <strong className="text-primary">{result.answer}</strong></p>
+  return (
+    <AppShell>
+      <div className="mx-auto flex min-h-[100dvh] w-full max-w-xl flex-col gap-3 px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-[calc(0.75rem+env(safe-area-inset-top))] sm:px-4 sm:gap-4">
+        <PageHeader
+          title="Đấu Trường Nét"
+          subtitle="Đoán bức tranh"
+          backHref="/"
+          actions={
+            <span className="rounded-full border border-panel-border/40 bg-panel/70 px-3 py-1.5 text-xs font-semibold text-on-arena sm:text-sm">
+              {remaining > 0 ? `Còn ${remaining} lượt đoán` : 'Hết lượt đoán'}
+            </span>
+          }
+        />
+
+        <div className="paper-mat rounded-xl p-2 shadow-paper sm:p-3">
+          <div ref={containerRef} className="aspect-[16/10] w-full overflow-hidden rounded-lg bg-paper ring-1 ring-paper-ink/15">
+            <canvas
+              ref={canvasRef}
+              className="h-full w-full"
+              role="img"
+              aria-label="Bức tranh thách thức đang được phát lại"
+            />
+          </div>
+          <p className="pt-2 text-center text-xs text-paper-ink/70">
+            Xem bức tranh và đoán từ khóa bên dưới.
+          </p>
+        </div>
+
+        {finished ? (
+          <Card className="border-panel-border/30 bg-panel/90 text-on-arena shadow-panel">
+            <CardContent className="space-y-4 p-5 text-center sm:p-6">
+              <div
+                className={`mx-auto flex h-14 w-14 items-center justify-center rounded-2xl ring-1 ${
+                  solved ? 'bg-success/15 text-success ring-success/40' : 'bg-destructive/15 text-destructive ring-destructive/40'
+                }`}
+                aria-hidden="true"
+              >
+                <span className="text-2xl">{solved ? '✓' : '!'}</span>
+              </div>
+              <div className="space-y-1" role="status" aria-live="polite">
+                <h2 className="text-xl font-bold">{solved ? 'Chính xác!' : 'Hết lượt đoán'}</h2>
+                {result?.answer ? (
+                  <p className="text-lg">
+                    Đáp án: <strong className="text-primary-foreground">{result.answer}</strong>
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-on-arena">Bạn đã dùng hết lượt đoán cho thách thức này.</p>
                 )}
-                {remaining > 0 && <p className="text-muted-foreground">Thử lại nào!</p>}
-              </>
-            )}
-            <div className="flex gap-2">
-              <Button className="flex-1" onClick={() => router.push('/challenge/create')}>
-                Tạo challenge mới
-              </Button>
-              <Button variant="outline" className="flex-1" onClick={() => router.push('/')}>
-                Trang chủ
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card className="w-full max-w-lg">
-          <CardContent className="pt-6 space-y-3">
-            <p className="text-center font-medium">Bạn đoán đây là gì?</p>
-            {result && !result.correct && (
-              <p className="text-center text-sm text-destructive">Sai rồi! Còn {remaining} lượt.</p>
-            )}
-            <div className="flex gap-2">
-              <Input
-                value={answer}
-                onChange={e => setAnswer(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleGuess()}
-                placeholder="Nhập đáp án..."
-                disabled={remaining <= 0 || guessing}
-              />
-              <Button onClick={handleGuess} disabled={!answer.trim() || remaining <= 0 || guessing}>
-                Đoán
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-    </main>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button className="min-h-11 w-full" onClick={() => router.push('/challenge/create')}>
+                  Tạo thách thức mới
+                </Button>
+                <Link
+                  href="/"
+                  className="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-panel-border/40 px-4 text-sm font-medium text-on-arena transition-colors hover:bg-panel/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border"
+                  aria-label="← Về trang chủ"
+                >
+                  ← Về trang chủ
+                </Link>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="border-panel-border/30 bg-panel/90 text-on-arena shadow-panel">
+            <CardContent className="space-y-3 p-5 sm:p-6">
+              <label htmlFor="challenge-answer" className="block text-center text-sm font-semibold">
+                Bạn đoán đây là gì?
+              </label>
+              {result && !result.correct && (
+                <p role="status" aria-live="polite" className="text-center text-sm text-warning">
+                  Sai rồi! Còn {remaining} lượt. Thử lại nào!
+                </p>
+              )}
+              <form
+                className="flex flex-col gap-2 sm:flex-row"
+                onSubmit={e => {
+                  e.preventDefault();
+                  void handleGuess();
+                }}
+              >
+                <Input
+                  id="challenge-answer"
+                  value={answer}
+                  onChange={e => setAnswer(e.target.value)}
+                  placeholder="Nhập đáp án..."
+                  disabled={guessing}
+                  autoComplete="off"
+                  className="min-h-11 flex-1 border-panel-border/40 bg-arena-950/60 text-on-arena placeholder:text-muted-on-arena"
+                />
+                <Button
+                  type="submit"
+                  className="min-h-11 w-full sm:w-auto"
+                  disabled={!answer.trim() || guessing}
+                  aria-busy={guessing}
+                >
+                  {guessing ? 'Đang gửi...' : 'Đoán'}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    </AppShell>
   );
 }

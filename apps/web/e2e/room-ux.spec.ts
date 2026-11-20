@@ -40,7 +40,7 @@ async function joinRoom(page: Page, code: string) {
 }
 
 test.describe('QR Direct Join', () => {
-  test('fresh visitor opens room link, enters nickname, joins lobby', async ({ browser }) => {
+  test('fresh visitor opens room link and auto-joins lobby', async ({ browser }) => {
     test.setTimeout(90000);
     const hostCtx = await browser.newContext();
     const host = await setupPlayer(hostCtx, 'QrHost');
@@ -54,8 +54,7 @@ test.describe('QR Direct Join', () => {
     const visitorCtx = await browser.newContext();
     const visitor = await visitorCtx.newPage();
     await visitor.goto(`${WEB}/room/${code}`);
-    await visitor.getByPlaceholder('Nhập tên của bạn...').fill('QrVisitor');
-    await visitor.locator('button', { hasText: 'Vào phòng' }).click();
+    // QR deep links auto-join: no nickname form should be required.
     await visitor.waitForFunction(
       () => document.body.innerText.includes('Phòng chờ'),
       null,
@@ -63,6 +62,7 @@ test.describe('QR Direct Join', () => {
     );
     const text = await visitor.evaluate(() => document.body.innerText);
     expect(text).toContain('QrHost');
+    expect(text).toContain('Player_');
     expect(text).toContain('Sẵn sàng');
 
     await hostCtx.close();

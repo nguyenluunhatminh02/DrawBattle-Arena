@@ -81,6 +81,7 @@ model RoomPlayer {
 
   @@unique([roomId, userId])
   @@unique([roomId, guestSessionId])
+  @@index([roomId, leftAt])
   @@map("room_players")
 }
 

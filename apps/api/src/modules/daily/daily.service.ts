@@ -1,4 +1,6 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { normalizeGuess, validateGuess } from '@drawbattle/shared';
@@ -12,34 +14,29 @@ export class DailyService {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const existing = await this.prisma.dailyChallenge.findUnique({
-      where: { date: today },
-    });
+    const lockKey = BigInt('0x' + createHash('sha256').update(`daily:${today.toISOString()}`).digest('hex').slice(0, 15));
+    await this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey})`;
 
-    if (existing) {
-      return;
-    }
+      const existing = await tx.dailyChallenge.findUnique({
+        where: { date: today },
+      });
+      if (existing) return;
 
-    const randomWord = await this.prisma.word.findFirst({
-      where: { active: true },
-      orderBy: { usageCount: 'asc' },
-    });
+      const randomWord = await tx.word.findFirst({
+        where: { active: true },
+        orderBy: { usageCount: 'asc' },
+      });
+      if (!randomWord) throw new Error('No active words available');
 
-    if (!randomWord) {
-      throw new Error('No active words available');
-    }
-
-    await this.prisma.dailyChallenge.create({
-      data: {
-        date: today,
-        wordId: randomWord.id,
-      },
-    });
-
-    await this.prisma.word.update({
-      where: { id: randomWord.id },
-      data: { usageCount: { increment: 1 } },
-    });
+      await tx.dailyChallenge.create({
+        data: { date: today, wordId: randomWord.id },
+      });
+      await tx.word.update({
+        where: { id: randomWord.id },
+        data: { usageCount: { increment: 1 } },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async getTodaysChallenge(userId?: string, guestSessionId?: string): Promise<any> {
@@ -132,58 +129,68 @@ export class DailyService {
       throw new BadRequestException('Challenge not found');
     }
 
-    const normalized = normalizeGuess(answer);
-    const synonyms = (challenge.word.synonyms as string[]) ?? [];
-    const correct = validateGuess(answer, challenge.word.canonical, synonyms);
+    // Serialize the check-then-create under an advisory lock so concurrent
+    // submissions cannot both pass the "already solved" gate.
+    const identityKey = userId ?? guestSessionId ?? '';
+    const lockKey = BigInt('0x' + createHash('sha256').update(`daily-submit:${dailyChallengeId}:${identityKey}`).digest('hex').slice(0, 15));
 
-    const whereCondition: any = {
-      dailyChallengeId,
-      correct: true,
-    };
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey})`;
 
-    if (userId) {
-      whereCondition.userId = userId;
-    } else if (guestSessionId) {
-      whereCondition.guestSessionId = guestSessionId;
-    }
+      const challenge = await tx.dailyChallenge.findUnique({
+        where: { id: dailyChallengeId },
+        include: { word: true },
+      });
+      if (!challenge) throw new BadRequestException('Challenge not found');
 
-    const existingAttempt = await this.prisma.dailyChallengeAttempt.findFirst({
-      where: whereCondition,
-    });
+      const normalized = normalizeGuess(answer);
+      const synonyms = (challenge.word.synonyms as string[]) ?? [];
+      const correct = validateGuess(answer, challenge.word.canonical, synonyms);
 
-    if (existingAttempt) {
-      throw new BadRequestException('Already solved today');
-    }
-
-    const attempt = await this.prisma.dailyChallengeAttempt.create({
-      data: {
+      const whereCondition: any = {
         dailyChallengeId,
-        userId,
-        guestSessionId,
-        answer,
-        normalized,
-        correct,
-      },
+        correct: true,
+      };
+      if (userId) whereCondition.userId = userId;
+      else if (guestSessionId) whereCondition.guestSessionId = guestSessionId;
+
+      const existingAttempt = await tx.dailyChallengeAttempt.findFirst({
+        where: whereCondition,
+      });
+      if (existingAttempt) throw new BadRequestException('Already solved today');
+
+      const attempt = await tx.dailyChallengeAttempt.create({
+        data: {
+          dailyChallengeId,
+          userId,
+          guestSessionId,
+          answer,
+          normalized,
+          correct,
+        },
+      });
+
+      if (correct && userId) {
+        await this.updateStreak(userId, tx);
+      }
+
+      return { attempt, correct };
     });
-
-    if (correct && userId) {
-      await this.updateStreak(userId);
-    }
-
-    return { attempt, correct };
   }
 
-  private async updateStreak(userId: string) {
+  private async updateStreak(userId: string, tx?: any) {
+    const client = tx ?? this.prisma;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
 
-    let streak = await this.prisma.streak.findUnique({ where: { userId } });
+    // Use upsert so concurrent calls cannot race between findUnique and create.
+    const existing = await client.streak.findUnique({ where: { userId } });
 
-    if (!streak) {
-      streak = await this.prisma.streak.create({
+    if (!existing) {
+      return client.streak.create({
         data: {
           userId,
           currentStreak: 1,
@@ -191,25 +198,23 @@ export class DailyService {
           lastPlayedAt: today,
         },
       });
-      return streak;
     }
 
-    const lastPlayed = new Date(streak.lastPlayedAt);
+    const lastPlayed = new Date(existing.lastPlayedAt);
     lastPlayed.setHours(0, 0, 0, 0);
 
-    let newStreak = streak.currentStreak;
-
+    let newStreak = existing.currentStreak;
     if (lastPlayed.getTime() === today.getTime()) {
-      return streak;
+      return existing;
     } else if (lastPlayed.getTime() === yesterday.getTime()) {
-      newStreak = streak.currentStreak + 1;
+      newStreak = existing.currentStreak + 1;
     } else {
       newStreak = 1;
     }
 
-    const longestStreak = Math.max(streak.longestStreak, newStreak);
+    const longestStreak = Math.max(existing.longestStreak, newStreak);
 
-    return this.prisma.streak.update({
+    return client.streak.update({
       where: { userId },
       data: {
         currentStreak: newStreak,

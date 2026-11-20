@@ -36,6 +36,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
   const batchTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingPointsRef = useRef<Array<{ x: number; y: number }>>([]);
   const dprRef = useRef(1);
+  const activePointerIdRef = useRef<number | null>(null);
 
   const getCanvasPoint = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>): { x: number; y: number } | null => {
@@ -142,7 +143,10 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer) return;
+    // Ignore multi-touch: only one active pointer at a time
+    if (activePointerIdRef.current !== null) return;
     e.preventDefault();
+    activePointerIdRef.current = e.pointerId;
     try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
     const point = getCanvasPoint(e);
     if (!point) return;
@@ -153,11 +157,14 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
     seqRef.current = 0;
     pendingPointsRef.current = [point];
     onStrokeStart?.({ turnId, strokeId });
+    // Clear existing timer before starting new one to prevent leaks
+    if (batchTimerRef.current) clearInterval(batchTimerRef.current);
     batchTimerRef.current = setInterval(flushBatch, GAME_CONSTANTS.STROKE_BATCH_MS);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer || !drawingRef.current || !currentStrokeRef.current) return;
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
     e.preventDefault();
     const point = getCanvasPoint(e);
     if (!point) return;
@@ -199,8 +206,10 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer || !drawingRef.current || !currentStrokeRef.current) return;
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
     e.preventDefault();
     drawingRef.current = false;
+    activePointerIdRef.current = null;
     if (batchTimerRef.current) {
       clearInterval(batchTimerRef.current);
       batchTimerRef.current = null;
@@ -222,7 +231,7 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
 
   return (
     <div className="flex flex-col h-full">
-      <div ref={containerRef} className="flex-1 min-h-0 bg-white rounded-lg overflow-hidden border">
+      <div ref={containerRef} className="flex-1 min-h-0 bg-white rounded-xl overflow-hidden border border-panel-border/30 shadow-paper will-change-transform">
         <canvas
           ref={canvasRef}
           className="w-full h-full touch-none block"
@@ -233,43 +242,45 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
         />
       </div>
       {isDrawer && (
-        <div className="flex items-center gap-1 md:gap-2 mt-2 p-1.5 md:p-2 bg-card rounded-lg border overflow-x-auto">
-          <div className="flex gap-0.5 md:gap-1 shrink-0">
+        <div className="flex items-center gap-2 mt-2 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] panel-arena rounded-xl shadow-panel overflow-x-auto no-scrollbar safe-bottom">
+          <div className="flex gap-1 shrink-0">
             <button
               onClick={() => setTool('pen')}
-              className={`w-9 h-9 md:w-8 md:h-8 rounded flex items-center justify-center text-xs ${tool === 'pen' ? 'bg-primary/20 font-bold' : 'bg-secondary'}`}
+              className={`w-11 h-11 rounded flex items-center justify-center text-base text-on-arena ${tool === 'pen' ? 'bg-primary font-bold' : 'bg-panel'}`}
               title="Bút"
             >
               ✏️
             </button>
             <button
               onClick={() => setTool('eraser')}
-              className={`w-9 h-9 md:w-8 md:h-8 rounded flex items-center justify-center text-xs ${tool === 'eraser' ? 'bg-primary/20 font-bold' : 'bg-secondary'}`}
+              className={`w-11 h-11 rounded flex items-center justify-center text-base text-on-arena ${tool === 'eraser' ? 'bg-primary font-bold' : 'bg-panel'}`}
               title="Tẩy"
             >
               🧹
             </button>
           </div>
           {tool === 'pen' && (
-            <div className="flex gap-0.5 md:gap-1 flex-wrap shrink-0">
+            <div className="flex gap-1 flex-wrap shrink-0">
               {COLORS.map(c => (
                 <button
                   key={c}
                   onClick={() => setColor(c)}
-                  className={`w-8 h-8 md:w-7 md:h-7 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-transparent'}`}
+                  className={`w-11 h-11 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-white/20'}`}
                   style={{ backgroundColor: c }}
                   aria-label={`Màu ${c}`}
+                  aria-pressed={color === c}
                 />
               ))}
             </div>
           )}
-          <div className="flex gap-0.5 md:gap-1 ml-1 md:ml-2 shrink-0">
+          <div className="flex gap-1 ml-2 shrink-0">
             {BRUSH_SIZES.map(s => (
               <button
                 key={s}
                 onClick={() => setBrushSize(s)}
-                className={`w-9 h-9 md:w-8 md:h-8 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary/20' : 'bg-secondary'}`}
+                className={`w-11 h-11 rounded flex items-center justify-center text-on-arena ${brushSize === s ? 'bg-primary' : 'bg-panel'}`}
                 aria-label={`Cỡ nét ${s}`}
+                aria-pressed={brushSize === s}
               >
                 <div className="rounded-full bg-current" style={{ width: s, height: s }} />
               </button>

@@ -4,6 +4,14 @@ const config: Config = {
   darkMode: ['class'],
   content: ['./src/**/*.{ts,tsx}'],
   theme: {
+    screens: {
+      xs: '480px',
+      sm: '640px',
+      md: '768px',
+      lg: '1024px',
+      xl: '1280px',
+      '2xl': '1536px',
+    },
     extend: {
       colors: {
         border: 'hsl(var(--border))',
@@ -35,11 +43,36 @@ const config: Config = {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
+        arena: {
+          950: 'hsl(var(--arena-950))',
+          900: 'hsl(var(--arena-900))',
+          800: 'hsl(var(--arena-800))',
+        },
+        panel: {
+          DEFAULT: 'hsl(var(--panel))',
+          border: 'hsl(var(--panel-border))',
+        },
+        paper: {
+          DEFAULT: 'hsl(var(--paper))',
+          mat: 'hsl(var(--paper-mat))',
+          ink: 'hsl(var(--ink))',
+        },
+        success: 'hsl(var(--success))',
+        warning: 'hsl(var(--warning))',
+        'team-a': 'hsl(var(--team-a))',
+        'team-b': 'hsl(var(--team-b))',
+      },
+      fontFamily: {
+        sans: ['var(--font-inter)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
+      },
+      boxShadow: {
+        panel: '0 18px 60px -28px hsl(255 80% 4% / 0.85)',
+        paper: '0 10px 35px -18px hsl(255 80% 6% / 0.7)',
       },
     },
   },

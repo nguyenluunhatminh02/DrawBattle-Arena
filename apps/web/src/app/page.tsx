@@ -5,8 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { AppShell } from '@/components/layout/AppShell';
 import { useGameStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { WORD_CATEGORIES, GAME_MODE_LABELS, getModeConfig } from '@drawbattle/shared';
@@ -149,218 +148,235 @@ export default function HomePage() {
   }
 
   return (
-    <main
-      className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50"
-      data-ready={hydrated ? 'true' : undefined}
-    >
-      <div className="w-full max-w-md space-y-4">
-        <div className="text-center">
-          <h1 className="text-4xl font-bold text-primary">DrawBattle</h1>
-          <p className="text-muted-foreground mt-2">Vẽ nhanh, đoán nhanh, cười cùng bạn bè</p>
-        </div>
+    <AppShell variant="arena">
+      <main
+        className="min-h-[100dvh] flex items-center justify-center p-4 safe-top safe-bottom"
+        data-ready={hydrated ? 'true' : undefined}
+      >
+        <div className="w-full max-w-md space-y-5">
+          <div className="text-center space-y-2">
+            <h1 className="text-4xl font-bold text-on-arena">DrawBattle</h1>
+            <p className="text-muted-on-arena">Vẽ nhanh, đoán nhanh, cười cùng bạn bè</p>
+          </div>
 
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Nickname & Avatar</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <Input
-              placeholder="Nhập tên của bạn..."
-              value={nickname}
-              onChange={e => setNickname(e.target.value)}
-              maxLength={20}
-              disabled={loading}
-            />
-            <div className="flex flex-wrap gap-1.5">
-              {AVATARS.map(a => (
-                <button
-                  key={a}
-                  onClick={() => setAvatar(a)}
-                  className={`w-9 h-9 rounded-lg text-lg flex items-center justify-center transition-all ${
-                    avatar === a ? 'bg-primary/20 ring-2 ring-primary scale-110' : 'bg-secondary hover:bg-secondary/80'
-                  }`}
-                >
-                  {a}
-                </button>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <div className="grid gap-3">
-          <div className="grid grid-cols-4 gap-1.5">
-            {GAME_MODES.map(mode => (
-              <button
-                key={mode}
-                onClick={() => handleModeChange(mode)}
+          <div className="panel-arena rounded-xl p-5 space-y-4">
+            <div className="space-y-3">
+              <label className="text-sm font-medium text-on-arena">Nickname & Avatar</label>
+              <Input
+                placeholder="Nhập tên của bạn..."
+                value={nickname}
+                onChange={e => setNickname(e.target.value)}
+                maxLength={20}
                 disabled={loading}
-                className={`rounded-lg px-1 py-2 text-xs font-medium transition-colors ${
-                  settings.mode === mode
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-secondary text-secondary-foreground hover:bg-secondary/70'
-                }`}
-              >
-                {GAME_MODE_LABELS[mode]}
-              </button>
-            ))}
-          </div>
+              />
+              <div className="flex flex-wrap gap-1.5">
+                {AVATARS.map(a => (
+                  <button
+                    key={a}
+                    onClick={() => setAvatar(a)}
+                    className={`w-11 h-11 rounded-lg text-xl flex items-center justify-center transition-all ${
+                      avatar === a
+                        ? 'bg-primary/30 ring-2 ring-primary scale-110'
+                        : 'bg-arena-800/50 hover:bg-arena-800/70 text-on-arena'
+                    }`}
+                    aria-label={`Chọn avatar ${a}`}
+                  >
+                    {a}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-          <div>
-            <Button size="lg" className="w-full" onClick={handleCreateRoom} disabled={!nickname.trim() || loading}>
-              Tạo phòng {GAME_MODE_LABELS[settings.mode]}
-            </Button>
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className="w-full text-xs text-muted-foreground hover:text-primary mt-1 underline"
-            >
-              {showSettings ? 'Ẩn cài đặt phòng' : 'Tùy chỉnh cài đặt phòng'}
-            </button>
-          </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-4 gap-1.5">
+                {GAME_MODES.map(mode => (
+                  <button
+                    key={mode}
+                    onClick={() => handleModeChange(mode)}
+                    disabled={loading}
+                    className={`h-11 rounded-lg px-1 text-xs font-medium transition-colors ${
+                      settings.mode === mode
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-arena-800/50 text-on-arena hover:bg-arena-800/70'
+                    }`}
+                  >
+                    {GAME_MODE_LABELS[mode]}
+                  </button>
+                ))}
+              </div>
 
-          {showSettings && (
-            <Card>
-              <CardContent className="pt-4 space-y-3">
-                {settings.mode !== 'DUEL' && (
+              <div className="space-y-2">
+                <Button
+                  size="lg"
+                  className="w-full h-14 text-base font-semibold"
+                  onClick={handleCreateRoom}
+                  disabled={!nickname.trim() || loading}
+                >
+                  Tạo phòng {GAME_MODE_LABELS[settings.mode]}
+                </Button>
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="w-full text-xs text-muted-on-arena hover:text-on-arena transition-colors"
+                >
+                  {showSettings ? 'Ẩn cài đặt phòng' : 'Tùy chỉnh cài đặt phòng'}
+                </button>
+              </div>
+
+              {showSettings && (
+                <div className="space-y-3 pt-2 border-t border-panel-border/20">
+                  {settings.mode !== 'DUEL' && (
+                    <div>
+                      <label className="text-xs font-medium text-muted-on-arena">Số người chơi: {settings.maxPlayers}</label>
+                      <input
+                        type="range"
+                        min={getModeConfig(settings.mode).minPlayers}
+                        max={getModeConfig(settings.mode).maxPlayers}
+                        value={settings.maxPlayers}
+                        onChange={e => setSettings(s => ({ ...s, maxPlayers: parseInt(e.target.value) }))}
+                        className="w-full mt-1"
+                      />
+                    </div>
+                  )}
+                  {settings.mode === 'DUEL' && (
+                    <p className="text-xs text-muted-on-arena">1v1 Duel: 2 người chơi, 3 lượt</p>
+                  )}
+                  {settings.mode !== 'DUEL' && (
+                    <div>
+                      <label className="text-xs font-medium text-muted-on-arena">Số vòng: {settings.rounds}</label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={3}
+                        value={settings.rounds}
+                        onChange={e => setSettings(s => ({ ...s, rounds: parseInt(e.target.value) }))}
+                        className="w-full mt-1"
+                      />
+                    </div>
+                  )}
                   <div>
-                    <label className="text-xs font-medium text-muted-foreground">Số người chơi: {settings.maxPlayers}</label>
-                    <input
-                      type="range"
-                      min={getModeConfig(settings.mode).minPlayers}
-                      max={getModeConfig(settings.mode).maxPlayers}
-                      value={settings.maxPlayers}
-                      onChange={e => setSettings(s => ({ ...s, maxPlayers: parseInt(e.target.value) }))}
-                      className="w-full"
-                    />
+                    <label className="text-xs font-medium text-muted-on-arena">Thời gian vẽ</label>
+                    {settings.mode === 'SPEED' || settings.mode === 'DUEL' ? (
+                      <p className="text-xs text-muted-on-arena mt-1">{settings.turnDuration}s (cố định cho chế độ này)</p>
+                    ) : (
+                      <div className="flex gap-2 mt-1">
+                        {[45, 60, 90].map(t => (
+                          <Button
+                            key={t}
+                            variant={settings.turnDuration === t ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => setSettings(s => ({ ...s, turnDuration: t }))}
+                            className="flex-1"
+                          >
+                            {t}s
+                          </Button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-                {settings.mode === 'DUEL' && (
-                  <p className="text-xs text-muted-foreground">1v1 Duel: 2 người chơi, 3 lượt</p>
-                )}
-                {settings.mode !== 'DUEL' && (
+                  {settings.mode === 'TEAM' && (
+                    <p className="text-xs text-muted-on-arena">Đội chiến: cần tối thiểu 4 người, chia 2 đội tự động</p>
+                  )}
                   <div>
-                    <label className="text-xs font-medium text-muted-foreground">Số vòng: {settings.rounds}</label>
-                    <input
-                      type="range"
-                      min={1}
-                      max={3}
-                      value={settings.rounds}
-                      onChange={e => setSettings(s => ({ ...s, rounds: parseInt(e.target.value) }))}
-                      className="w-full"
-                    />
-                  </div>
-                )}
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground">Thời gian vẽ</label>
-                  {settings.mode === 'SPEED' || settings.mode === 'DUEL' ? (
-                    <p className="text-xs text-muted-foreground mt-1">{settings.turnDuration}s (cố định cho chế độ này)</p>
-                  ) : (
-                    <div className="flex gap-2 mt-1">
-                      {[45, 60, 90].map(t => (
+                    <label className="text-xs font-medium text-muted-on-arena">Độ khó</label>
+                    <div className="flex gap-1.5 mt-1 flex-wrap">
+                      {(['EASY', 'MEDIUM', 'HARD', 'MIXED'] as Difficulty[]).map(d => (
                         <Button
-                          key={t}
-                          variant={settings.turnDuration === t ? 'default' : 'outline'}
+                          key={d}
+                          variant={settings.difficulty === d ? 'default' : 'outline'}
                           size="sm"
-                          onClick={() => setSettings(s => ({ ...s, turnDuration: t }))}
-                          className="flex-1"
+                          onClick={() => setSettings(s => ({ ...s, difficulty: d }))}
                         >
-                          {t}s
+                          {d === 'EASY' ? 'Dễ' : d === 'MEDIUM' ? 'Trung bình' : d === 'HARD' ? 'Khó' : 'Hỗn hợp'}
                         </Button>
                       ))}
                     </div>
-                  )}
-                </div>
-                {settings.mode === 'TEAM' && (
-                  <p className="text-xs text-muted-foreground">Đội chiến: cần tối thiểu 4 người, chia 2 đội tự động</p>
-                )}
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground">Độ khó</label>
-                  <div className="flex gap-1.5 mt-1 flex-wrap">
-                    {(['EASY', 'MEDIUM', 'HARD', 'MIXED'] as Difficulty[]).map(d => (
-                      <Button
-                        key={d}
-                        variant={settings.difficulty === d ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={() => setSettings(s => ({ ...s, difficulty: d }))}
-                      >
-                        {d === 'EASY' ? 'Dễ' : d === 'MEDIUM' ? 'Trung bình' : d === 'HARD' ? 'Khó' : 'Hỗn hợp'}
-                      </Button>
-                    ))}
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-on-arena">Chủ đề</label>
+                    <select
+                      value={settings.category}
+                      onChange={e => setSettings(s => ({ ...s, category: e.target.value }))}
+                      className="w-full mt-1 h-11 rounded-md border border-panel-border/30 bg-arena-900/50 px-3 text-sm text-on-arena"
+                    >
+                      <option value="">Tất cả</option>
+                      {WORD_CATEGORIES.map(c => (
+                        <option key={c.slug} value={c.slug}>{c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-muted-on-arena">Gợi ý (hints)</label>
+                    <button
+                      onClick={() => setSettings(s => ({ ...s, enableHints: !s.enableHints }))}
+                      className={`w-11 h-6 rounded-full transition-colors ${settings.enableHints ? 'bg-primary' : 'bg-arena-800'}`}
+                      aria-label="Bật tắt gợi ý"
+                    >
+                      <div className={`w-5 h-5 rounded-full bg-white shadow transition-transform ${settings.enableHints ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-muted-on-arena">Mật khẩu (tùy chọn)</label>
+                    <Input
+                      placeholder="Để trống = không mật khẩu"
+                      value={settings.password}
+                      onChange={e => setSettings(s => ({ ...s, password: e.target.value }))}
+                      maxLength={20}
+                      className="mt-1"
+                    />
                   </div>
                 </div>
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground">Chủ đề</label>
-                  <select
-                    value={settings.category}
-                    onChange={e => setSettings(s => ({ ...s, category: e.target.value }))}
-                    className="w-full mt-1 h-9 rounded-md border bg-background px-3 text-sm"
-                  >
-                    <option value="">Tất cả</option>
-                    {WORD_CATEGORIES.map(c => (
-                      <option key={c.slug} value={c.slug}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-medium text-muted-foreground">Gợi ý (hints)</label>
-                  <button
-                    onClick={() => setSettings(s => ({ ...s, enableHints: !s.enableHints }))}
-                    className={`w-10 h-5 rounded-full transition-colors ${settings.enableHints ? 'bg-primary' : 'bg-secondary'}`}
-                  >
-                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${settings.enableHints ? 'translate-x-5' : 'translate-x-0.5'}`} />
-                  </button>
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground">Mật khẩu (tùy chọn)</label>
+              )}
+
+              <div className="space-y-2 pt-2 border-t border-panel-border/20">
+                <label className="text-xs font-medium text-muted-on-arena">Vào phòng có sẵn</label>
+                <div className="flex gap-2">
                   <Input
-                    placeholder="Để trống = không mật khẩu"
-                    value={settings.password}
-                    onChange={e => setSettings(s => ({ ...s, password: e.target.value }))}
-                    maxLength={20}
-                    className="mt-1"
+                    placeholder="Mã phòng"
+                    value={roomCode}
+                    onChange={e => setRoomCode(e.target.value.toUpperCase())}
+                    maxLength={6}
+                    disabled={loading}
+                    className="uppercase flex-1"
                   />
+                  <Button
+                    variant="secondary"
+                    onClick={handleJoinRoom}
+                    disabled={!nickname.trim() || !roomCode.trim() || loading}
+                  >
+                    Vào
+                  </Button>
                 </div>
-              </CardContent>
-            </Card>
-          )}
+              </div>
 
-          <Card>
-            <CardContent className="pt-6 flex gap-2">
-              <Input
-                placeholder="Mã phòng"
-                value={roomCode}
-                onChange={e => setRoomCode(e.target.value.toUpperCase())}
-                maxLength={6}
-                disabled={loading}
-                className="uppercase"
-              />
-              <Button
-                variant="outline"
-                onClick={handleJoinRoom}
-                disabled={!nickname.trim() || !roomCode.trim() || loading}
-              >
-                Vào
-              </Button>
-            </CardContent>
-          </Card>
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-panel-border/20">
+                <Button
+                  variant="secondary"
+                  onClick={handleChallenge}
+                  disabled={!nickname.trim() || loading}
+                >
+                  Thách bạn bè
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={handleDaily}
+                  disabled={!nickname.trim() || loading}
+                >
+                  Thử thách hàng ngày
+                </Button>
+              </div>
 
-          <Button variant="secondary" size="lg" onClick={handleChallenge} disabled={!nickname.trim() || loading}>
-            Thách bạn bè
-          </Button>
-
-          <Button variant="outline" size="lg" onClick={handleDaily} disabled={!nickname.trim() || loading}>
-            Thử thách hàng ngày
-          </Button>
-
-          <div className="flex gap-3 justify-center">
-            <Link href="/history" className="text-sm text-muted-foreground hover:text-primary underline">
-              Lịch sử
-            </Link>
-            <Link href="/leaderboard" className="text-sm text-muted-foreground hover:text-primary underline">
-              Bảng xếp hạng
-            </Link>
+              <div className="flex gap-4 justify-center pt-2">
+                <Link href="/history" className="text-sm text-muted-on-arena hover:text-on-arena transition-colors">
+                  Lịch sử
+                </Link>
+                <Link href="/leaderboard" className="text-sm text-muted-on-arena hover:text-on-arena transition-colors">
+                  Bảng xếp hạng
+                </Link>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    </main>
+      </main>
+    </AppShell>
   );
 }

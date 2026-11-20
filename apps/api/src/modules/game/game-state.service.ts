@@ -118,6 +118,7 @@ export class GameStateService {
   private readonly rooms = new Map<string, RoomState>();
   private readonly sinks = new Map<string, EventSink>();
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly autoEndTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly wordService: WordService,
@@ -185,6 +186,24 @@ export class GameStateService {
     if (room.players.has(id)) {
       const p = room.players.get(id)!;
       p.isOnline = true;
+      // A reconnecting player increases the eligible-guesser count, so a
+      // pending auto-end timer must be cleared and turn timing re-evaluated.
+      const autoTimer = this.autoEndTimers.get(roomId);
+      if (autoTimer) {
+        clearTimeout(autoTimer);
+        this.autoEndTimers.delete(roomId);
+        const turn = room.match?.turn;
+        if (turn && turn.phase === 'DRAWING' && !turn.ended) {
+          const eligible = Array.from(room.players.values()).filter(
+            pp => pp.id !== turn.drawerId && pp.isOnline && !this.isTeammate(room, turn.drawerId, pp.id),
+          );
+          if (turn.correctGuessers.size < eligible.length) {
+            const remaining = Math.max(0, turn.endsAt - Date.now());
+            if (turn.timer) clearTimeout(turn.timer);
+            turn.timer = setTimeout(() => void this.endTurn(roomId), remaining);
+          }
+        }
+      }
       return this.toPlayerInfo(p);
     }
     const player: PlayerState = {
@@ -736,7 +755,12 @@ export class GameStateService {
       );
       if (turn.correctGuessers.size >= eligibleGuessers.length) {
         if (turn.timer) clearTimeout(turn.timer);
-        setTimeout(() => void this.endTurn(roomId), 1500);
+        // Store the auto-end timer so a reconnecting player during the grace
+        // period can clear/re-evaluate it (eligible guesser count increased).
+        this.autoEndTimers.set(roomId, setTimeout(() => {
+          this.autoEndTimers.delete(roomId);
+          void this.endTurn(roomId);
+        }, 1500));
       }
 
       return { accepted: true, correct: true, score };
@@ -790,6 +814,27 @@ export class GameStateService {
     for (const t of turn.hintTimers) clearTimeout(t);
     turn.timer = null;
     turn.hintTimers = [];
+    const autoTimer = this.autoEndTimers.get(roomId);
+    if (autoTimer) {
+      clearTimeout(autoTimer);
+      this.autoEndTimers.delete(roomId);
+    }
+    // A DRAWING turn that is aborted (e.g. drawer leaves) already affected
+    // in-memory guesses/scores, so keep it for the endMatch flush. A WORD_PICK
+    // turn has no wordId and cannot satisfy the Turn.wordId FK, so skip it.
+    if (turn.wordId) {
+      turn.endsAt = Date.now();
+      room.match.completedTurns.push({
+        id: turn.id,
+        drawerId: turn.drawerId,
+        wordId: turn.wordId,
+        strokes: turn.strokes,
+        startedAt: turn.startedAt,
+        endsAt: turn.endsAt,
+        correctCount: turn.correctGuessers.size,
+        guesses: turn.guesses,
+      });
+    }
     room.match.turn = null;
     this.emit(roomId, { type: 'match:phaseChanged', payload: { phase: 'NEXT_TURN' } });
     setTimeout(() => this.transitionToNextTurn(roomId), 1000);
@@ -807,6 +852,11 @@ export class GameStateService {
     for (const t of turn.hintTimers) clearTimeout(t);
     turn.timer = null;
     turn.hintTimers = [];
+    const autoTimer = this.autoEndTimers.get(roomId);
+    if (autoTimer) {
+      clearTimeout(autoTimer);
+      this.autoEndTimers.delete(roomId);
+    }
     turn.phase = 'REVEAL';
 
     const drawer = room.players.get(turn.drawerId);
@@ -904,6 +954,17 @@ export class GameStateService {
 
       const matchState = room.match;
       room.match = null;
+
+      // Reset ready + per-turn flags when the match ends so rematches cannot
+      // bypass the ready gate with stale state from the previous match.
+      for (const p of room.players.values()) {
+        p.isReady = false;
+        p.hasCorrectGuess = false;
+        p.usedHint = false;
+        p.guessesThisTurn = 0;
+      }
+      // Emit authoritative snapshot so clients see the reset flags.
+      this.emit(roomId, { type: 'room:snapshot', payload: this.getSnapshot(roomId) });
 
       let persistOk = false;
       try {

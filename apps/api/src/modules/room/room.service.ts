@@ -115,6 +115,7 @@ export class RoomService {
     const hasPassword = Boolean(settings.passwordHash);
     const { password: _p, passwordHash: _h, ...safeSettings } = settings;
     return {
+      id: room.id,
       code: room.code,
       status: room.status,
       playerCount: room.players.length,
@@ -141,12 +142,22 @@ export class RoomService {
         throw new BadRequestException('Room expired');
       }
 
+      const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
+
+      // A reconnecting player is still subject to the room password. Checking
+      // this before the early return prevents password-free rejoin while the
+      // disconnect grace timer has not yet persisted leftAt.
+      if (settings.passwordHash && !verifyRoomPassword(password, settings.passwordHash)) {
+        throw new BadRequestException('Invalid password');
+      }
+
       const activePlayers = room.players.filter(p => !p.leftAt);
       const existing = room.players.find(
         p =>
           (userId && p.userId === userId) ||
           (guestSessionId && p.guestSessionId === guestSessionId),
       );
+      // Allow reconnects during active matches - return existing player immediately
       if (existing && !existing.leftAt) {
         return {
           roomId: room.id,
@@ -155,13 +166,11 @@ export class RoomService {
         };
       }
 
+      // Only check room status for genuinely new joins
       if (room.status !== 'WAITING') {
         throw new BadRequestException('Game already in progress');
       }
-      const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
-      if (settings.passwordHash && !verifyRoomPassword(password, settings.passwordHash)) {
-        throw new BadRequestException('Invalid password');
-      }
+
       if (activePlayers.length >= settings.maxPlayers) {
         throw new BadRequestException('Room is full');
       }

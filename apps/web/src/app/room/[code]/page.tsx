@@ -13,12 +13,15 @@ import { DrawingCanvas } from '@/components/canvas/DrawingCanvas';
 import { QRCodeDisplay } from '@/components/ui/qr-code';
 import { getModeConfig } from '@drawbattle/shared';
 import type { RoomSnapshot, PlayerInfo, StrokeChunk, ChatMessage, ScoreUpdate, MatchResult, TurnSnapshot, PhaseData, GamePhase, WordOption, TeamsPayload } from '@drawbattle/shared';
+import { AppShell } from '@/components/layout';
 
 export default function RoomPage() {
   const params = useParams();
   const router = useRouter();
   const code = (params.code as string).toUpperCase();
   const player = useGameStore(s => s.player);
+  const authToken = useGameStore(s => s.token);
+  const user = useGameStore(s => s.user);
   const room = useGameStore(s => s.room);
   const myPlayerId = useGameStore(s => s.myPlayerId);
   const currentPhase = useGameStore(s => s.currentPhase);
@@ -49,22 +52,95 @@ export default function RoomPage() {
   const [joinNickname, setJoinNickname] = useState('');
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [autoJoining, setAutoJoining] = useState(false);
+  const [roomUnavailable, setRoomUnavailable] = useState<string | null>(null);
+  const [joinVersion, setJoinVersion] = useState(0);
+  const autoJoinRef = useRef(false);
 
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => setHydrated(true), []);
+
+  // Reset QR-join state when navigating to a different room code.
+  useEffect(() => {
+    autoJoinRef.current = false;
+    setRoomUnavailable(null);
+    setNeedPassword(false);
+    setJoinError(null);
+  }, [code]);
+
+  // QR links land on /room/CODE with no persisted identity. Bootstrap one
+  // guest session automatically for open rooms; password rooms still require
+  // manual input. The ref is reset in cleanup so React StrictMode's second
+  // mount can retry; the cancelled flag prevents duplicate sessions.
+  useEffect(() => {
+    if (!hydrated || player || autoJoinRef.current || roomUnavailable) return;
+    autoJoinRef.current = true;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await api.getRoomInfo(code);
+        if (cancelled) return;
+        if (info.status !== 'WAITING') {
+          setRoomUnavailable('Phòng đã bắt đầu hoặc không còn sẵn sàng.');
+          return;
+        }
+        if (info.playerCount >= info.maxPlayers) {
+          setRoomUnavailable('Phòng đã đầy.');
+          return;
+        }
+        if (info.hasPassword) {
+          setNeedPassword(true);
+          return;
+        }
+
+        // Authenticated users already carry a verified JWT and a persisted
+        // player identity; do not create an orphaned guest session.
+        if (authToken || user) return;
+
+        setAutoJoining(true);
+        const nickname = `Player_${Math.floor(1000 + Math.random() * 9000)}`;
+        const session = await api.createGuest(nickname);
+        if (cancelled) return;
+        useGameStore.getState().setPlayer({
+          token: session.token,
+          playerId: session.playerId,
+          nickname,
+        });
+      } catch (err) {
+        if (!cancelled) {
+          setRoomUnavailable(err instanceof Error ? err.message : 'Không thể vào phòng');
+        }
+      } finally {
+        if (!cancelled) setAutoJoining(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      // StrictMode remounts this effect; allow the second run to retry.
+      // The first async call above is cancelled before it can create a guest.
+      autoJoinRef.current = false;
+    };
+  }, [hydrated, player, authToken, user, code, roomUnavailable]);
 
   useEffect(() => {
     if (!hydrated) return;
     if (!player || !player.nickname || !player.token) return;
 
-    const socket = connectSocket(player.token);
+    // A registered account should join with its verified user JWT. Guest
+    // sessions remain the fallback for anonymous players. Never create a
+    // guest identity for an authenticated user — the gateway derives the
+    // authoritative nickname from the verified JWT.
+    const socketToken = authToken || player.token;
+    const socket = connectSocket(socketToken);
     const store = useGameStore.getState;
 
     let joined = false;
     const join = () => {
       if (joined) return;
       joined = true;
-      socket.emit('room:join', { roomCode: code, token: player.token, nickname: player.nickname, password: passwordRef.current || undefined });
+      socket.emit('room:join', { roomCode: code, token: socketToken, password: passwordRef.current || undefined });
       setTimeout(() => {
         if (!useGameStore.getState().room) socket.emit('state:resync');
       }, 1500);
@@ -256,10 +332,25 @@ export default function RoomPage() {
       router.push('/');
     });
 
+    socket.on('room:kicked', () => {
+      alert('Bạn đã bị host kick khỏi phòng');
+      useGameStore.getState().setRoom(null);
+      useGameStore.getState().setMyPlayerId(null);
+      router.push('/');
+    });
+
     socket.on('error', (errCode: string, message: string) => {
       if (errCode === 'INVALID_PASSWORD') {
         joined = false;
+        setJoining(false);
         setNeedPassword(true);
+        setJoinError('Mật khẩu không đúng. Vui lòng thử lại.');
+        return;
+      }
+      if (errCode === 'KICKED') {
+        useGameStore.getState().setRoom(null);
+        useGameStore.getState().setMyPlayerId(null);
+        router.push('/');
         return;
       }
       setErrorMsg(`${errCode}: ${message}`);
@@ -285,7 +376,7 @@ export default function RoomPage() {
       disconnectSocket();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, player, code, router]);
+  }, [hydrated, player, authToken, code, joinVersion, router]);
 
   useEffect(() => {
     if (!turnEndsAt) return;
@@ -303,26 +394,14 @@ export default function RoomPage() {
 
   if (!hydrated) return null;
 
-  if (!player || !player.nickname || !player.token) {
+  if (roomUnavailable) {
     return (
       <div className="h-[100dvh] flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50">
         <Card className="w-full max-w-sm">
-          <CardContent className="pt-6 space-y-3">
-            <h2 className="text-lg font-semibold text-center">Vào phòng <span className="font-mono text-primary">{code}</span></h2>
-            <p className="text-sm text-muted-foreground text-center">Nhập tên để tham gia cùng bạn bè</p>
-            <Input
-              value={joinNickname}
-              onChange={e => setJoinNickname(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && joinWithNickname()}
-              placeholder="Nhập tên của bạn..."
-              maxLength={20}
-              autoFocus
-              className="h-11 text-base"
-            />
-            {joinError && <p className="text-sm text-destructive">{joinError}</p>}
-            <Button className="w-full h-11" onClick={joinWithNickname} disabled={!joinNickname.trim() || joining}>
-              {joining ? 'Đang vào...' : 'Vào phòng'}
-            </Button>
+          <CardContent className="pt-6 space-y-3 text-center">
+            <h2 className="text-lg font-semibold">Không vào được phòng</h2>
+            <p className="text-sm text-muted-foreground">{roomUnavailable}</p>
+            <Button className="w-full h-11" onClick={() => router.push('/')}>Về trang chủ</Button>
           </CardContent>
         </Card>
       </div>
@@ -343,8 +422,35 @@ export default function RoomPage() {
               placeholder="Nhập mật khẩu..."
               autoFocus
             />
-            <Button className="w-full" onClick={submitPassword} disabled={!passwordInput.trim()}>
-              Vào phòng
+            <Button className="w-full h-11" onClick={submitPassword} disabled={!passwordInput.trim() || joining}>
+              {joining ? 'Đang vào...' : 'Vào phòng'}
+            </Button>
+            {joinError && <p className="text-sm text-destructive text-center">{joinError}</p>}
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!player || !player.nickname || !player.token) {
+    return (
+      <div className="h-[100dvh] flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50">
+        <Card className="w-full max-w-sm">
+          <CardContent className="pt-6 space-y-3">
+            <h2 className="text-lg font-semibold text-center">Vào phòng <span className="font-mono text-primary">{code}</span></h2>
+            <p className="text-sm text-muted-foreground text-center">Nhập tên để tham gia cùng bạn bè</p>
+            <Input
+              value={joinNickname}
+              onChange={e => setJoinNickname(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && joinWithNickname()}
+              placeholder="Nhập tên của bạn..."
+              maxLength={20}
+              autoFocus
+              className="h-11 text-base"
+            />
+            {joinError && <p className="text-sm text-destructive">{joinError}</p>}
+            <Button className="w-full h-11" onClick={joinWithNickname} disabled={!joinNickname.trim() || joining}>
+              {joining ? 'Đang vào...' : 'Vào phòng'}
             </Button>
           </CardContent>
         </Card>
@@ -397,15 +503,35 @@ export default function RoomPage() {
     }
   }
 
-  function submitPassword() {
-    passwordRef.current = passwordInput.trim();
-    setNeedPassword(false);
-    getSocket()?.emit('room:join', {
-      roomCode: code,
-      token: player!.token,
-      nickname: player!.nickname,
-      password: passwordRef.current,
-    });
+  async function submitPassword() {
+    const pwd = passwordInput.trim();
+    if (!pwd || joining) return;
+    setJoining(true);
+    setJoinError(null);
+    passwordRef.current = pwd;
+    try {
+      // A QR scan on a password room has no player yet. Bootstrap a guest
+      // identity; the socket effect will join with passwordRef.current.
+      // Never create a guest for an authenticated user — they keep their JWT.
+      if (!player && !authToken) {
+        const nickname = `Player_${Math.floor(1000 + Math.random() * 9000)}`;
+        const session = await api.createGuest(nickname);
+        useGameStore.getState().setPlayer({
+          token: session.token,
+          playerId: session.playerId,
+          nickname,
+        });
+      }
+      setNeedPassword(false);
+      // If player already exists (registered user or previous guest), trigger
+      // socket rejoin by bumping joinVersion so the effect re-runs.
+      if (player || authToken) {
+        setJoinVersion(v => v + 1);
+      }
+    } catch (err) {
+      setJoinError(err instanceof Error ? err.message : 'Không thể vào phòng');
+      setJoining(false);
+    }
   }
 
   function handleStart() {
@@ -462,33 +588,34 @@ export default function RoomPage() {
   const sortedScores = [...scores].sort((a, b) => b.points - a.points);
 
   return (
-    <div className="h-[100dvh] flex flex-col bg-background">
-      <header className="flex items-center justify-between gap-1.5 px-2 md:px-4 py-1.5 md:py-2 border-b bg-card">
+    <AppShell>
+    <div className="h-[100dvh] flex flex-col text-on-arena">
+      <header className="flex items-center justify-between gap-1.5 px-3 md:px-4 py-2 safe-top arena-bg border-b border-panel-border/30">
         <div className="flex items-center gap-1.5 md:gap-3 min-w-0">
-          <h1 className="font-bold text-primary text-sm md:text-base shrink-0">DrawBattle</h1>
-          <Badge variant="outline" className="shrink-0 font-mono">{code}</Badge>
+          <h1 className="font-black text-primary text-sm md:text-base shrink-0 tracking-tight">DrawBattle</h1>
+          <Badge variant="outline" className="shrink-0 font-mono border-panel-border/40 text-on-arena">{code}</Badge>
           {room?.settings.mode && room.settings.mode !== 'CLASSIC' && (
             <Badge variant="secondary" className="shrink-0 hidden xs:inline-flex sm:inline-flex">
               {room.settings.mode === 'DUEL' ? '1v1' : room.settings.mode === 'SPEED' ? 'Speed' : 'Đội'}
             </Badge>
           )}
-          <span className={`hidden sm:inline text-xs shrink-0 ${connected ? 'text-green-500' : 'text-red-500'}`}>
-            {connected ? '● online' : '○ offline'}
+          <span className={`hidden sm:inline text-xs shrink-0 ${connected ? 'text-success' : 'text-destructive'}`}>
+            {connected ? '● trực tuyến' : '○ mất kết nối'}
           </span>
         </div>
         <div className="flex items-center gap-1 md:gap-2 shrink-0">
           {currentPhase && currentPhase !== 'WAITING' && currentPhase !== 'MATCH_RESULT' && (
-            <Badge variant="secondary" className="shrink-0">{timeLeft}s</Badge>
+            <Badge className="shrink-0 score-number text-base px-3">{timeLeft}s</Badge>
           )}
           {drawerOrder && currentPhase && currentPhase !== 'WAITING' && (
-            <div className="hidden md:block text-xs text-muted-foreground">
+            <div className="hidden md:block text-xs text-muted-on-arena">
               Thứ tự: {drawerOrder.map((d, i) => <span key={d.id} className={d.id === drawerId ? 'font-bold text-primary' : ''}>{i > 0 && ' → '}{d.nickname}</span>)}
             </div>
           )}
-          <Button size="sm" variant="outline" onClick={copyLink} className="shrink-0 h-8 px-2 md:px-3">
+          <Button size="sm" variant="outline" onClick={copyLink} className="shrink-0 h-11 px-3 border-panel-border/40 bg-transparent text-on-arena hover:bg-panel">
             <span className="hidden md:inline">Copy Link</span><span className="md:hidden">Link</span>
           </Button>
-          <Button size="sm" variant="ghost" className="text-destructive shrink-0 h-8 px-2 md:px-3" onClick={() => {
+          <Button size="sm" variant="ghost" className="text-destructive shrink-0 h-11 px-3" onClick={() => {
             if (confirm('Bạn có chắc muốn rời phòng?')) {
               getSocket()?.emit('room:leave');
             }
@@ -503,16 +630,16 @@ export default function RoomPage() {
       )}
 
       {teams && currentPhase && currentPhase !== 'WAITING' && currentPhase !== 'MATCH_RESULT' && (
-        <div className="flex items-center justify-center gap-3 md:gap-6 px-2 md:px-4 py-1.5 border-b bg-card text-xs overflow-x-auto">
+        <div className="flex items-center justify-center gap-3 md:gap-6 px-2 md:px-4 py-1.5 border-b border-panel-border/30 bg-panel/50 text-xs overflow-x-auto no-scrollbar">
           <div className="flex items-center gap-1.5">
-            <Badge variant="secondary" className={myTeam === 'A' ? 'bg-blue-600 text-white' : ''}>Đội A</Badge>
-            <span className="text-muted-foreground">
+            <Badge className={`${myTeam === 'A' ? 'bg-team-a text-white' : 'bg-panel text-on-arena'} shrink-0`}>● Đội A</Badge>
+            <span className="text-muted-on-arena whitespace-nowrap">
               {teams.teamA.map(m => m.nickname + (m.id === myPlayerId ? ' (bạn)' : '')).join(', ')}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <Badge variant="secondary" className={myTeam === 'B' ? 'bg-red-600 text-white' : ''}>Đội B</Badge>
-            <span className="text-muted-foreground">
+            <Badge className={`${myTeam === 'B' ? 'bg-team-b text-white' : 'bg-panel text-on-arena'} shrink-0`}>▲ Đội B</Badge>
+            <span className="text-muted-on-arena whitespace-nowrap">
               {teams.teamB.map(m => m.nickname + (m.id === myPlayerId ? ' (bạn)' : '')).join(', ')}
             </span>
           </div>
@@ -523,39 +650,48 @@ export default function RoomPage() {
         <div className="flex-1 flex flex-col min-h-0 md:min-h-full overflow-hidden">
           {room?.status === 'WAITING' && !currentPhase && (
             <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
-              <Card className="w-full max-w-md">
+              <Card className="w-full max-w-md panel-arena border-0 shadow-panel text-on-arena">
                 <CardContent className="pt-4 md:pt-6 space-y-3 md:space-y-4">
-                  <h2 className="text-lg md:text-xl font-semibold text-center">Phòng chờ</h2>
+                  <div className="text-center space-y-1">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-on-arena">Sân chơi</p>
+                    <h2 className="text-xl md:text-2xl font-black tracking-tight">Phòng chờ</h2>
+                  </div>
 
-                  <div className="flex flex-col items-center gap-2 p-3 bg-secondary/30 rounded">
-                    <p className="text-sm text-muted-foreground">Quét để mời bạn bè</p>
-                    <QRCodeDisplay value={`${typeof window !== 'undefined' ? window.location.origin : ''}/room/${code}`} size={140} />
-                    <p className="text-xs font-mono">Mã: <span className="font-bold">{code}</span></p>
+                  <div className="flex flex-col items-center gap-2 p-3 rounded-xl bg-panel/70 border border-panel-border/30">
+                    <p className="text-sm text-muted-on-arena">Quét mã để mời bạn bè</p>
+                    <div className="p-2 bg-paper rounded-lg shadow-paper">
+                      <QRCodeDisplay value={`${typeof window !== 'undefined' ? window.location.origin : ''}/room/${code}`} size={140} />
+                    </div>
+                    <p className="text-xs font-mono text-muted-on-arena">Mã phòng: <span className="font-bold text-on-arena">{code}</span></p>
                   </div>
 
                   <div className="space-y-2">
                     {room.players.map(p => (
-                      <div key={p.id} className="flex items-center justify-between p-2 rounded bg-secondary/50">
-                        <span className="truncate min-w-0">{p.nickname}{p.id === myPlayerId ? ' (bạn)' : ''}</span>
+                      <div key={p.id} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-panel/50 border border-panel-border/20">
+                        <span className="truncate min-w-0 text-sm">{p.nickname}{p.id === myPlayerId ? ' (bạn)' : ''}</span>
                         <div className="flex gap-1 items-center flex-wrap justify-end shrink-0">
-                          {!p.isOnline && <Badge variant="outline">offline</Badge>}
-                          {p.isReady && <Badge variant="secondary">ready</Badge>}
-                          {p.isOnline && !p.isReady && !p.isHost && <Badge variant="outline" className="text-muted-foreground font-normal">chưa sẵn sàng</Badge>}
-                          {p.isMuted && <Badge variant="secondary">muted</Badge>}
-                          {p.isHost && <Badge>Host</Badge>}
+                          {!p.isOnline && <Badge variant="outline" className="border-destructive/50 text-destructive">Ngoại tuyến</Badge>}
+                          {p.isReady && <Badge className="bg-success text-white">Sẵn sàng</Badge>}
+                          {p.isOnline && !p.isReady && !p.isHost && <Badge variant="outline" className="text-muted-on-arena font-normal border-panel-border/30">Chưa sẵn sàng</Badge>}
+                          {p.isMuted && <Badge variant="secondary">Đã tắt tiếng</Badge>}
+                          {p.isHost && <Badge>Chủ phòng</Badge>}
                           {amIHost && p.id !== myPlayerId && (
                             <div className="flex gap-1">
                               <button
                                 onClick={() => getSocket()?.emit('room:hostAction', { action: 'mute', targetId: p.id })}
-                                className="text-xs px-1.5 py-0.5 bg-secondary rounded hover:bg-secondary/80"
-                              >🔇</button>
+                                className="w-11 h-11 flex items-center justify-center text-base bg-panel rounded hover:bg-panel/70 text-on-arena"
+                                aria-label={p.isMuted ? 'Bật tiếng' : 'Tắt tiếng'}
+                                title={p.isMuted ? 'Bật tiếng' : 'Tắt tiếng'}
+                              >{p.isMuted ? '🔈' : '🔇'}</button>
                               <button
                                 onClick={() => {
                                   if (confirm(`Kick ${p.nickname}?`)) {
                                     getSocket()?.emit('room:hostAction', { action: 'kick', targetId: p.id });
                                   }
                                 }}
-                                className="text-xs px-1.5 py-0.5 bg-destructive/10 rounded hover:bg-destructive/20"
+                                className="w-11 h-11 flex items-center justify-center text-base bg-destructive/10 rounded hover:bg-destructive/20"
+                                aria-label="Kick"
+                                title="Kick"
                               >❌</button>
                             </div>
                           )}
@@ -564,36 +700,40 @@ export default function RoomPage() {
                     ))}
                   </div>
                   {amIHost && (
-                    <div className="space-y-2 p-3 bg-secondary/30 rounded text-xs">
-                      <div className="flex items-center justify-between">
-                        <span>Số vòng</span>
+                    <div className="space-y-3 p-3 rounded-xl bg-panel/50 border border-panel-border/20 text-sm">
+                      <div className="flex items-center justify-between gap-3">
+                        <label htmlFor="room-rounds" className="text-muted-on-arena">Số vòng</label>
                         <select
+                          id="room-rounds"
                           value={room.settings.rounds}
                           onChange={e => getSocket()?.emit('room:updateSettings', { rounds: parseInt(e.target.value) })}
-                          className="h-7 rounded border bg-background px-2"
+                          className="h-11 rounded-md border border-panel-border/30 bg-panel px-3 text-base text-on-arena"
                         >
                           {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
                         </select>
                       </div>
                       {room.settings.mode === 'CLASSIC' && (
-                        <div className="flex items-center justify-between">
-                          <span>Thời gian vẽ</span>
+                        <div className="flex items-center justify-between gap-3">
+                          <label htmlFor="room-duration" className="text-muted-on-arena">Thời gian vẽ</label>
                           <select
+                            id="room-duration"
                             value={room.settings.turnDuration}
                             onChange={e => getSocket()?.emit('room:updateSettings', { turnDuration: parseInt(e.target.value) })}
-                            className="h-7 rounded border bg-background px-2"
+                            className="h-11 rounded-md border border-panel-border/30 bg-panel px-3 text-base text-on-arena"
                           >
                             {[45, 60, 90].map(n => <option key={n} value={n}>{n}s</option>)}
                           </select>
                         </div>
                       )}
-                      <div className="flex items-center justify-between">
-                        <span>Gợi ý (hints)</span>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-on-arena">Gợi ý (hints)</span>
                         <button
                           onClick={() => getSocket()?.emit('room:updateSettings', { enableHints: !room.settings.enableHints })}
-                          className={`w-9 h-5 rounded-full transition-colors ${room.settings.enableHints ? 'bg-primary' : 'bg-secondary'}`}
+                          className={`w-12 h-11 rounded-full transition-colors relative ${room.settings.enableHints ? 'bg-primary' : 'bg-panel'}`}
+                          aria-label="Bật/tắt gợi ý"
+                          aria-pressed={room.settings.enableHints}
                         >
-                          <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${room.settings.enableHints ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                          <div className={`w-6 h-6 rounded-full bg-white shadow transition-transform absolute top-2.5 ${room.settings.enableHints ? 'translate-x-5' : 'translate-x-0.5'}`} />
                         </button>
                       </div>
                     </div>
@@ -687,17 +827,18 @@ export default function RoomPage() {
 
           {currentPhase === 'REVEAL' && (
             <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
-              <Card className="w-full max-w-md">
+              <Card className="w-full max-w-md panel-arena border-0 shadow-panel text-on-arena">
                 <CardContent className="pt-6 space-y-4 text-center">
-                  <h2 className="text-2xl font-bold text-primary">{revealWord}</h2>
-                  <p className="text-muted-foreground">Người đoán đúng:</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-on-arena">Đáp án</p>
+                  <h2 className="text-3xl md:text-4xl font-black tracking-tight text-primary">{revealWord}</h2>
+                  <p className="text-sm text-muted-on-arena">Người đoán đúng:</p>
                   <div className="flex flex-wrap gap-2 justify-center">
                     {revealGuessers.map(id => {
                       const p = room?.players.find(x => x.id === id);
                       return <Badge key={id}>{p?.nickname || '?'}</Badge>;
                     })}
                     {revealGuessers.length === 0 && (
-                      <p className="text-sm text-muted-foreground">Không ai đoán đúng</p>
+                      <p className="text-sm text-muted-on-arena">Không ai đoán đúng</p>
                     )}
                   </div>
                 </CardContent>
@@ -715,41 +856,44 @@ export default function RoomPage() {
 
           {currentPhase === 'MATCH_RESULT' && matchResults && (
             <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
-              <Card className="w-full max-w-md">
+              <Card className="w-full max-w-md panel-arena border-0 shadow-panel text-on-arena">
                 <CardContent className="pt-6 space-y-4">
-                  <h2 className="text-2xl font-bold text-center">Kết quả</h2>
+                  <div className="text-center space-y-1">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-on-arena">Tổng kết</p>
+                    <h2 className="text-2xl md:text-3xl font-black tracking-tight">Kết quả</h2>
+                  </div>
                   {matchResults.teams && (
-                    <div className="p-4 rounded-lg bg-secondary/50 text-center space-y-2">
-                      <p className="font-semibold">
+                    <div className="p-4 rounded-xl bg-panel/60 border border-panel-border/30 text-center space-y-2">
+                      <p className="font-bold text-lg">
                         {matchResults.teams.winner === 'DRAW'
                           ? 'Hòa!'
                           : `Đội ${matchResults.teams.winner} thắng!`}
                       </p>
                       <div className="flex items-center justify-center gap-6 text-sm">
-                        <span>
-                          Đội A: <strong>{matchResults.teams.teamA.points} pts</strong>
+                        <span className="text-team-a">
+                          ● Đội A: <strong className="score-number">{matchResults.teams.teamA.points} điểm</strong>
                         </span>
-                        <span>
-                          Đội B: <strong>{matchResults.teams.teamB.points} pts</strong>
+                        <span className="text-team-b">
+                          ▲ Đội B: <strong className="score-number">{matchResults.teams.teamB.points} điểm</strong>
                         </span>
                       </div>
                     </div>
                   )}
                   {matchResults.rankings.length > 0 && (
-                    <div className="text-center p-4 bg-gradient-to-r from-yellow-100 to-yellow-50 rounded-lg border-2 border-yellow-300">
-                      <p className="text-4xl">🏆</p>
+                    <div className="text-center p-4 bg-warning/10 rounded-xl border-2 border-warning/60">
+                      <p className="text-4xl" aria-hidden>🏆</p>
                       <p className="text-lg font-bold">{matchResults.rankings[0].nickname}</p>
-                      <p className="text-2xl font-bold text-primary">{matchResults.rankings[0].points} pts</p>
+                      <p className="text-3xl font-black text-primary score-number">{matchResults.rankings[0].points} điểm</p>
                     </div>
                   )}
                   <div className="space-y-2">
                     {matchResults.rankings.slice(1).map(r => (
-                      <div key={r.playerId} className="flex items-center justify-between p-3 rounded bg-secondary/50">
+                      <div key={r.playerId} className="flex items-center justify-between p-3 rounded-xl bg-panel/50 border border-panel-border/20">
                         <div className="flex items-center gap-3">
-                          <span className="text-lg font-bold text-muted-foreground">#{r.rank}</span>
+                          <span className="text-lg font-bold text-muted-on-arena score-number">#{r.rank}</span>
                           <span className="font-medium">{r.nickname}</span>
                         </div>
-                        <span className="font-bold text-primary">{r.points} pts</span>
+                        <span className="font-bold text-primary score-number">{r.points} điểm</span>
                       </div>
                     ))}
                   </div>
@@ -757,14 +901,14 @@ export default function RoomPage() {
                     {amIHost && (
                       <Button className="flex-1" size="lg" onClick={handleRematch}>Chơi lại</Button>
                     )}
-                    <Button variant="outline" className="flex-1" size="lg" onClick={() => {
+                    <Button variant="outline" className="flex-1 border-panel-border/40 bg-transparent text-on-arena hover:bg-panel" size="lg" onClick={() => {
                       if (navigator.share) {
                         navigator.share({ title: 'DrawBattle', text: `Kết quả: ${matchResults.rankings[0]?.nickname} thắng!`, url: window.location.href });
                       } else {
                         navigator.clipboard.writeText(window.location.href);
                       }
                     }}>Chia sẻ</Button>
-                    <Button variant="outline" size="lg" onClick={() => router.push('/')}>Về trang chủ</Button>
+                    <Button variant="outline" className="border-panel-border/40 bg-transparent text-on-arena hover:bg-panel" size="lg" onClick={() => router.push('/')}>Về trang chủ</Button>
                   </div>
                 </CardContent>
               </Card>
@@ -772,31 +916,31 @@ export default function RoomPage() {
           )}
         </div>
 
-        <div className={`${room?.status === 'WAITING' && !currentPhase ? 'hidden md:flex' : 'flex'} w-full md:w-80 h-[38dvh] md:h-auto md:flex-initial border-t md:border-t-0 md:border-l flex-col bg-card flex-shrink-0 min-h-0`}>
-          <div className="p-3 border-b hidden md:block">
-            <h3 className="font-semibold text-sm">Bảng điểm</h3>
+        <div className={`${room?.status === 'WAITING' && !currentPhase ? 'hidden md:flex' : 'flex'} w-full md:w-80 h-[30dvh] md:h-[50dvh] md:h-auto md:flex-initial border-t md:border-t-0 md:border-l border-panel-border/30 flex-col panel-arena flex-shrink-0 min-h-0 safe-bottom no-scrollbar`}>
+          <div className="p-3 border-b border-panel-border/30 hidden md:block">
+            <h3 className="font-semibold text-sm text-on-arena">Bảng điểm</h3>
           </div>
-          <div className="md:flex-1 overflow-x-auto md:overflow-y-auto p-2 md:p-3 flex md:block gap-1.5 md:space-y-1 border-b md:border-b-0 shrink-0">
+          <div className="md:flex-1 overflow-x-auto md:overflow-y-auto p-2 md:p-3 flex md:block gap-1.5 md:space-y-1 border-b md:border-b-0 border-panel-border/30 shrink-0">
             {sortedScores.map((s, i) => {
               const p = room?.players.find(x => x.id === s.playerId);
               return (
-                <div key={s.playerId} className="flex items-center justify-between text-sm p-1 shrink-0 rounded bg-secondary/40 md:bg-transparent px-2 md:px-1 gap-1.5">
+                <div key={s.playerId} className="flex items-center justify-between text-sm p-1 shrink-0 rounded bg-panel/40 md:bg-transparent px-2 md:px-1 gap-1.5 text-on-arena">
                   <span className="truncate max-w-[7rem] md:max-w-none">
-                    <span className="text-muted-foreground mr-1">{i + 1}.</span>
+                    <span className="text-muted-on-arena mr-1 score-number">{i + 1}.</span>
                     {p?.nickname || '?'}
                   </span>
-                  <span className="font-medium">{s.points}</span>
+                  <span className="font-medium score-number">{s.points}</span>
                 </div>
               );
             })}
           </div>
-          <div className="border-t md:border-t flex flex-col flex-1 min-h-0 md:flex-initial md:h-64">
-            <div className="flex-1 overflow-y-auto p-3 space-y-1 text-sm">
+          <div className="border-t border-panel-border/30 flex flex-col flex-1 min-h-0 md:flex-initial md:h-64">
+            <div className="flex-1 overflow-y-auto p-3 space-y-1 text-sm text-on-arena">
               {chat.map(msg => (
                 <div key={msg.id}>
-                  <span className="font-medium text-xs">{msg.nickname}: </span>
+                  <span className="font-medium text-xs text-muted-on-arena">{msg.nickname}: </span>
                   {msg.isCorrect ? (
-                    <span className="text-green-600 font-medium">đã đoán đúng!</span>
+                    <span className="text-success font-medium">đã đoán đúng!</span>
                   ) : (
                     <span>{msg.message}</span>
                   )}
@@ -804,16 +948,16 @@ export default function RoomPage() {
               ))}
               <div ref={chatEndRef} />
             </div>
-            <div className="p-2 border-t flex gap-1">
+            <div className="p-2 border-t border-panel-border/30 flex gap-1">
               <Input
                 value={chatInput}
                 onChange={e => setChatInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleSendChat()}
                 placeholder={chatPlaceholder}
                 disabled={chatDisabled}
-                className="text-base md:text-sm h-10 md:h-8"
+                className="text-base md:text-sm h-11"
               />
-              <Button size="sm" onClick={handleSendChat} disabled={!chatInput.trim() || chatDisabled} className="h-10 md:h-8 px-3 md:px-3">
+              <Button size="sm" onClick={handleSendChat} disabled={!chatInput.trim() || chatDisabled} className="h-11 px-4 shrink-0">
                 Gửi
               </Button>
             </div>
@@ -821,5 +965,6 @@ export default function RoomPage() {
         </div>
       </div>
     </div>
+    </AppShell>
   );
 }

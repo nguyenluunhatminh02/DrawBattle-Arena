@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { AppShell } from '@/components/layout/AppShell';
+import { PageHeader } from '@/components/layout/PageHeader';
 import { COLORS, BRUSH_SIZES } from '@drawbattle/shared';
 import { useGameStore } from '@/lib/store';
 import { api } from '@/lib/api';
@@ -38,6 +40,8 @@ export default function ChallengeCreatePage() {
   const drawingRef = useRef(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState(false);
 
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => setHydrated(true), []);
@@ -82,6 +86,7 @@ export default function ChallengeCreatePage() {
     if (!challengeId || finishedRef.current) return;
     finishedRef.current = true;
     setFinished(true);
+    setFinalizing(true);
     const allStrokes = [...strokesRef.current];
     if (currentStrokeRef.current) allStrokes.push(currentStrokeRef.current);
     try {
@@ -98,6 +103,9 @@ export default function ChallengeCreatePage() {
       );
       setShareUrl(`${window.location.origin}/challenge/${challengeId}`);
     } catch {
+      setFinalizeError(true);
+    } finally {
+      setFinalizing(false);
     }
   }
   finishRef.current = handleFinish;
@@ -192,93 +200,196 @@ export default function ChallengeCreatePage() {
 
   if (shareUrl) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50">
-        <Card className="w-full max-w-md">
-          <CardContent className="pt-6 space-y-4 text-center">
-            <h2 className="text-2xl font-bold text-primary">Challenge tạo xong!</h2>
-            <p className="text-muted-foreground">Gửi link cho bạn bè đoán</p>
-            <div className="p-3 bg-secondary rounded break-all text-sm">{shareUrl}</div>
-            <div className="flex gap-2">
-              <Button className="flex-1" onClick={copyShareLink}>Copy Link</Button>
-              <Button variant="outline" className="flex-1" onClick={() => router.push('/')}>
-                Về trang chủ
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </main>
+      <AppShell>
+        <PageHeader title="Đấu Trường Nét" subtitle="Thách thức hoàn tất" />
+        <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-6">
+          <Card className="border-panel-border/30 bg-panel/90 text-on-arena shadow-panel">
+            <CardContent className="space-y-4 p-5 text-center sm:p-6">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-success/15 ring-1 ring-success/40" aria-hidden="true">
+                <span className="text-2xl text-success">✓</span>
+              </div>
+              <div className="space-y-1">
+                <h2 className="text-xl font-bold sm:text-2xl">Tạo thách thức thành công!</h2>
+                <p className="text-sm text-muted-on-arena">Gửi liên kết cho bạn bè để đoán bức tranh của bạn.</p>
+              </div>
+              <div className="rounded-lg bg-arena-950/60 p-3 ring-1 ring-panel-border/30">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-on-arena">Liên kết chia sẻ</p>
+                <p className="mt-1 break-all text-sm text-on-arena">{shareUrl}</p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button className="min-h-11 w-full" onClick={copyShareLink}>Sao chép liên kết</Button>
+                <Link
+                  href="/"
+                  className="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-panel-border/40 px-4 text-sm font-medium text-on-arena transition-colors hover:bg-panel/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border"
+                  aria-label="← Về trang chủ"
+                >
+                  ← Về trang chủ
+                </Link>
+              </div>
+            </CardContent>
+          </Card>
+        </main>
+      </AppShell>
     );
   }
 
   if (!started) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50">
-        <Card className="w-full max-w-md">
-          <CardContent className="pt-6 space-y-4 text-center">
-            <h2 className="text-2xl font-bold text-primary">Thách bạn bè</h2>
-            <p className="text-muted-foreground">
-              Bạn sẽ nhận một từ ngẫu nhiên và có 15 giây để vẽ. Sau đó gửi link cho bạn bè đoán!
-            </p>
-            <Button className="w-full" size="lg" onClick={handleStart} disabled={loading}>
-              {loading ? 'Đang tạo...' : 'Bắt đầu vẽ'}
-            </Button>
-            <Button variant="ghost" onClick={() => router.push('/')}>Quay lại</Button>
-          </CardContent>
-        </Card>
-      </main>
+      <AppShell>
+        <PageHeader title="Đấu Trường Nét" subtitle="Tạo thách thức" />
+        <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-6">
+          <Card className="border-panel-border/30 bg-panel/90 text-on-arena shadow-panel">
+            <CardContent className="space-y-5 p-5 text-center sm:p-6">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-paper shadow-paper" aria-hidden="true">
+                <span className="text-3xl text-paper-ink">✎</span>
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-xl font-bold sm:text-2xl">Thách bạn bè</h2>
+                <p className="text-sm text-muted-on-arena">
+                  Bạn sẽ nhận một từ ngẫu nhiên và có 15 giây để vẽ. Sau đó gửi liên kết cho bạn bè đoán!
+                </p>
+              </div>
+              <Button className="min-h-11 w-full" size="lg" onClick={handleStart} disabled={loading} aria-busy={loading}>
+                {loading ? 'Đang tạo thách thức...' : 'Bắt đầu vẽ'}
+              </Button>
+              {loading && (
+                <p role="status" className="text-sm text-muted-on-arena">Đang chuẩn bị từ ngẫu nhiên...</p>
+              )}
+              <Link
+                href="/"
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-md text-sm font-medium text-muted-on-arena transition-colors hover:bg-panel/70 hover:text-on-arena focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border"
+                aria-label="← Về trang chủ"
+              >
+                ← Về trang chủ
+              </Link>
+            </CardContent>
+          </Card>
+        </main>
+      </AppShell>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-background">
-      <header className="flex items-center justify-between px-4 py-2 border-b bg-card">
-        <div className="flex items-center gap-3">
-          <h1 className="font-bold text-primary">DrawBattle</h1>
-          <Badge variant="destructive">{timeLeft}s</Badge>
-        </div>
-        <div className="text-center">
-          <p className="text-xs text-muted-foreground">Vẽ từ:</p>
-          <p className="font-bold text-lg">{word}</p>
-        </div>
-      </header>
-
-      <div ref={containerRef} className="flex-1 min-h-0 bg-white m-2 rounded-lg overflow-hidden border">
-        <canvas
-          ref={canvasRef}
-          className="w-full h-full touch-none"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-        />
-      </div>
-
-      <div className="flex items-center gap-2 p-2 bg-card border-t">
-        <div className="flex gap-1 flex-wrap">
-          {COLORS.map(c => (
-            <button
-              key={c}
-              onClick={() => setColor(c)}
-              className={`w-7 h-7 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-transparent'}`}
-              style={{ backgroundColor: c }}
-            />
-          ))}
-        </div>
-        <div className="flex gap-1 ml-2">
-          {BRUSH_SIZES.map(s => (
-            <button
-              key={s}
-              onClick={() => setBrushSize(s)}
-              className={`w-8 h-8 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary/20' : 'bg-secondary'}`}
+    <AppShell>
+      <main className="mx-auto flex min-h-[100dvh] w-full max-w-2xl flex-col gap-3 px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-[calc(0.75rem+env(safe-area-inset-top))] sm:px-4 sm:gap-4">
+        <header className="panel-arena flex items-center justify-between gap-2 rounded-xl px-3 py-2 shadow-panel sm:px-4">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <Link
+              href="/"
+              aria-label="← Về trang chủ"
+              className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium text-on-arena transition-colors hover:bg-panel/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border sm:px-3 sm:text-sm"
             >
-              <div className="rounded-full bg-current" style={{ width: s, height: s }} />
-            </button>
-          ))}
+              <span aria-hidden="true">←</span>
+              <span className="hidden sm:inline">Về trang chủ</span>
+              <span className="sr-only sm:hidden">Về trang chủ</span>
+            </Link>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-bold text-on-arena sm:text-base">Đấu Trường Nét</p>
+              <p className="text-[11px] text-muted-on-arena">Đang vẽ thách thức</p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="text-right">
+              <p className="text-[11px] text-muted-on-arena">Vẽ từ</p>
+              <p className="max-w-[28vw] truncate text-base font-bold text-on-arena sm:max-w-none" aria-live="polite">
+                {word}
+              </p>
+            </div>
+            <span
+              className={`min-w-[3.25rem] rounded-lg px-2 py-1.5 text-center text-base font-bold tabular-nums ${
+                timeLeft <= 5 ? 'bg-destructive text-destructive-foreground' : 'bg-panel-border/30 text-on-arena'
+              }`}
+              role="timer"
+              aria-label={`Thời gian còn lại: ${timeLeft} giây`}
+            >
+              {timeLeft}s
+            </span>
+          </div>
+        </header>
+
+        {finished && (
+          <div
+            role="status"
+            className="panel-arena flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-on-arena"
+          >
+            <span aria-hidden="true">{finalizeError ? '!' : '✓'}</span>
+            <span>
+              {finalizeError
+                ? 'Không thể lưu thách thức. Vui lòng thử lại.'
+                : finalizing
+                  ? 'Đang lưu bức tranh...'
+                  : 'Đã hết giờ. Bức tranh đã được lưu!'}
+            </span>
+          </div>
+        )}
+
+        <div className="paper-mat relative min-h-0 flex-1 rounded-xl p-2 shadow-paper sm:p-3">
+          <div ref={containerRef} className="h-full min-h-[16rem] w-full overflow-hidden rounded-lg bg-paper ring-1 ring-paper-ink/15 sm:min-h-[20rem]">
+            <canvas
+              ref={canvasRef}
+              className="h-full w-full touch-none"
+              aria-label="Khu vực vẽ thách thức"
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+            />
+          </div>
+          {finished && (
+            <div className="pointer-events-none absolute inset-2 flex items-start justify-center rounded-lg bg-paper/70 pt-6 sm:inset-3">
+              <span className="rounded-full bg-arena-950/80 px-4 py-2 text-sm font-semibold text-on-arena">
+                {finalizeError ? 'Chưa lưu được thách thức' : 'Đã hoàn thành'}
+              </span>
+            </div>
+          )}
         </div>
-        <Button variant="outline" size="sm" onClick={handleUndo} className="ml-auto" disabled={strokes.length === 0}>
-          Undo
-        </Button>
-      </div>
-    </div>
+
+        <div className="panel-arena space-y-2 rounded-xl p-3 shadow-panel sm:p-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+            <fieldset className="flex min-w-0 items-center gap-1.5">
+              <legend className="sr-only">Màu cọ</legend>
+              {COLORS.map(c => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setColor(c)}
+                  disabled={finished}
+                  className={`h-11 w-11 shrink-0 rounded-full border-2 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:opacity-50 ${
+                    color === c ? 'scale-110 border-on-arena ring-2 ring-panel-border' : 'border-transparent'
+                  }`}
+                  style={{ backgroundColor: c }}
+                  aria-label={`Màu ${c}`}
+                  aria-pressed={color === c}
+                />
+              ))}
+            </fieldset>
+            <fieldset className="flex items-center gap-1.5">
+              <legend className="sr-only">Kích thước cọ</legend>
+              {BRUSH_SIZES.map(s => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setBrushSize(s)}
+                  disabled={finished}
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-panel-border disabled:opacity-50 ${
+                    brushSize === s ? 'bg-panel-border/30 ring-1 ring-panel-border' : 'bg-arena-950/50'
+                  }`}
+                  aria-label={`Cỡ cọ ${s}`}
+                  aria-pressed={brushSize === s}
+                >
+                  <span className="rounded-full bg-on-arena" style={{ width: s + 4, height: s + 4 }} aria-hidden="true" />
+                </button>
+              ))}
+            </fieldset>
+          </div>
+          <div className="flex items-center justify-between gap-2 border-t border-panel-border/20 pt-3">
+            <p className="text-xs text-muted-on-arena">Chạm và kéo để vẽ trên giấy.</p>
+            <Button variant="outline" onClick={handleUndo} className="min-h-11 shrink-0" disabled={strokes.length === 0 || finished}>
+              Hoàn tác
+            </Button>
+          </div>
+        </div>
+      </main>
+    </AppShell>
   );
 }

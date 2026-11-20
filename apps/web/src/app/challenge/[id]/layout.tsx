@@ -32,8 +32,8 @@ export async function generateMetadata({
 
   if (!info || info.status === 'EXPIRED') {
     return {
-      title: 'DrawBattle - Challenge đã hết hạn',
-      description: 'Challenge này không còn hoạt động.',
+      title: 'Đấu Trường Nét - Thách thức đã hết hạn',
+      description: 'Thách thức này không còn hoạt động.',
     };
   }
 

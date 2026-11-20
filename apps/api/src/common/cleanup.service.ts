@@ -27,10 +27,13 @@ export class CleanupService implements OnModuleInit, OnModuleDestroy {
         where: { expiresAt: { lt: now }, status: 'ACTIVE' },
         data: { status: 'EXPIRED' },
       });
+      // Soft-deleted RoomPlayer rows (leftAt IS NOT NULL) must not block guest
+      // session cleanup; otherwise every guest who ever joined a room stays
+      // in the DB forever.
       const guests = await this.prisma.guestSession.deleteMany({
         where: {
           expiresAt: { lt: now },
-          roomPlayers: { none: {} },
+          roomPlayers: { every: { leftAt: { not: null } } },
           dailyChallengeAttempts: { none: {} },
         },
       });

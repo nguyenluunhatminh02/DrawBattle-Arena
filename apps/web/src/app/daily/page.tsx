@@ -4,11 +4,10 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { AppShell } from '@/components/layout/AppShell';
+import { PageHeader } from '@/components/layout/PageHeader';
 import { useGameStore } from '@/lib/store';
-import { api } from '@/lib/api';
 
 export default function DailyChallengePage() {
   const router = useRouter();
@@ -58,88 +57,115 @@ export default function DailyChallengePage() {
 
   if (!player) return null;
 
+  const backAction = (
+    <Link
+      href="/"
+      className="inline-flex h-11 items-center rounded-md border border-panel-border/30 bg-arena-800/40 px-3 text-sm font-medium text-on-arena transition-colors hover:bg-arena-800/70"
+    >
+      ← Về trang chủ
+    </Link>
+  );
+
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-muted-foreground">Loading daily challenge...</p>
-      </div>
+      <AppShell variant="arena">
+        <PageHeader title="Thử thách hàng ngày" actions={backAction} />
+        <main className="mx-auto flex min-h-[70dvh] max-w-6xl items-center justify-center px-4 py-8">
+          <p className="text-muted-on-arena">Đang tải thử thách hàng ngày...</p>
+        </main>
+      </AppShell>
     );
   }
 
   if (!daily) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-4">
-        <Card className="w-full max-w-md">
-          <CardContent className="pt-6 text-center space-y-4">
-            <h2 className="text-2xl font-bold">Daily Challenge Unavailable</h2>
-            <Link href="/"><Button variant="outline">← Home</Button></Link>
-          </CardContent>
-        </Card>
-      </main>
+      <AppShell variant="arena">
+        <PageHeader title="Thử thách hàng ngày" actions={backAction} />
+        <main className="mx-auto flex min-h-[70dvh] max-w-md items-center justify-center px-4 py-8">
+          <div className="panel-arena w-full space-y-4 rounded-xl p-6 text-center">
+            <h2 className="text-xl font-bold text-on-arena">Thử thách hàng ngày không khả dụng</h2>
+            <p className="text-sm text-muted-on-arena">Hãy thử lại sau hoặc quay về trang chủ.</p>
+            <div className="flex justify-center">{backAction}</div>
+          </div>
+        </main>
+      </AppShell>
     );
   }
 
   const alreadySolved = daily.userAttempt?.correct;
 
   return (
-    <main className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-orange-50 to-pink-50">
-      <div className="w-full max-w-lg space-y-6">
-        <Card>
-          <CardContent className="pt-8 pb-8 space-y-6 text-center">
-            <div className="text-5xl">🎯</div>
-            <h1 className="text-2xl font-bold">Thử thách hàng ngày</h1>
-            <p className="text-muted-foreground">
-              Đoán từ của ngày hôm nay! Chủ đề: <strong>{daily.word?.category?.name || 'Hỗn hợp'}</strong>
+    <AppShell variant="arena">
+      <PageHeader
+        title="Thử thách hàng ngày"
+        subtitle="Đoán từ của ngày hôm nay"
+        actions={backAction}
+      />
+      <main className="safe-bottom mx-auto max-w-2xl space-y-4 px-4 py-6 md:py-8">
+        <div className="panel-arena space-y-5 rounded-xl p-5 text-center">
+          <div className="text-5xl">🎯</div>
+          <div className="space-y-1">
+            <h2 className="text-2xl font-bold text-on-arena">Thử thách hàng ngày</h2>
+            <p className="text-sm text-muted-on-arena">
+              Chủ đề: <strong className="text-on-arena">{daily.word?.category?.name || 'Hỗn hợp'}</strong>
             </p>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-secondary rounded-lg">
-                <p className="text-2xl font-bold text-primary">{daily.stats?.totalAttempts || 0}</p>
-                <p className="text-xs text-muted-foreground">Lượt đoán</p>
-              </div>
-              <div className="p-3 bg-secondary rounded-lg">
-                <p className="text-2xl font-bold text-green-600">{daily.stats?.successRate?.toFixed(0) || 0}%</p>
-                <p className="text-xs text-muted-foreground">Tỷ lệ đúng</p>
-              </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg bg-arena-800/40 p-3">
+              <p className="score-number text-2xl font-bold text-on-arena">{daily.stats?.totalAttempts || 0}</p>
+              <p className="text-xs text-muted-on-arena">Lượt đoán</p>
             </div>
-          </CardContent>
-        </Card>
+            <div className="rounded-lg bg-arena-800/40 p-3">
+              <p className="score-number text-2xl font-bold text-success">{daily.stats?.successRate?.toFixed(0) || 0}%</p>
+              <p className="text-xs text-muted-on-arena">Tỷ lệ đúng</p>
+            </div>
+          </div>
+        </div>
 
         {alreadySolved ? (
-          <Card>
-            <CardContent className="pt-6 text-center space-y-4">
-              <Badge className="bg-green-500 text-white text-lg px-4 py-1">Bạn đã đoán đúng!</Badge>
-              <p className="text-2xl font-bold text-primary">{daily.word.canonical}</p>
-              <Link href="/"><Button variant="outline" className="w-full">← Home</Button></Link>
-            </CardContent>
-          </Card>
+          <div className="panel-arena space-y-4 rounded-xl p-5 text-center">
+            <span className="inline-flex rounded-md bg-success/20 px-4 py-1.5 text-base font-semibold text-success">
+              Bạn đã đoán đúng!
+            </span>
+            <p className="score-number text-2xl font-bold text-on-arena">{daily.word.canonical}</p>
+            <div className="flex justify-center">{backAction}</div>
+          </div>
         ) : (
-          <Card>
-            <CardContent className="pt-6 space-y-3">
-              <p className="text-center font-medium">Bạn đoán đây là gì?</p>
-              {result && !result.correct && (
-                <p className="text-center text-sm text-destructive">Sai rồi! Thử lại nào.</p>
-              )}
-              <div className="flex gap-2">
-                <Input
-                  value={answer}
-                  onChange={e => setAnswer(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleGuess()}
-                  placeholder="Nhập đáp án..."
-                  disabled={guessing}
-                />
-                <Button onClick={handleGuess} disabled={!answer.trim() || guessing}>
-                  Đoán
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+          <form
+            className="panel-arena space-y-3 rounded-xl p-5"
+            onSubmit={e => {
+              e.preventDefault();
+              handleGuess();
+            }}
+          >
+            <p className="text-center font-medium text-on-arena">Bạn đoán đây là gì?</p>
+            {result && !result.correct && (
+              <p role="status" className="text-center text-sm text-destructive">Sai rồi! Thử lại nào.</p>
+            )}
+            <div className="flex gap-2">
+              <Input
+                value={answer}
+                onChange={e => setAnswer(e.target.value)}
+                placeholder="Nhập đáp án..."
+                disabled={guessing}
+              />
+              <Button type="submit" className="min-w-[72px]" disabled={!answer.trim() || guessing}>
+                Đoán
+              </Button>
+            </div>
+          </form>
         )}
 
-        <div className="flex gap-2">
-          <Link href="/" className="flex-1"><Button variant="outline" className="w-full">← Home</Button></Link>
-          <Link href="/leaderboard" className="flex-1"><Button variant="outline" className="w-full">Leaderboard</Button></Link>
+        <div className="flex flex-wrap gap-2 justify-center">
+          {backAction}
+          <Link
+            href="/leaderboard"
+            className="inline-flex h-11 items-center rounded-md border border-panel-border/30 bg-arena-800/40 px-3 text-sm font-medium text-on-arena transition-colors hover:bg-arena-800/70"
+          >
+            Bảng xếp hạng
+          </Link>
         </div>
-      </div>
-    </main>
+      </main>
+    </AppShell>
   );
 }

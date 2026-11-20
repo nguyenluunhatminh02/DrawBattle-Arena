@@ -22,6 +22,22 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 262 83% 58%;
     --radius: 0.75rem;
+
+    /* DrawBattle arena tokens: dark shell, white paper stage */
+    --arena-950: 257 65% 9%;
+    --arena-900: 255 66% 14%;
+    --arena-800: 257 53% 22%;
+    --panel: 255 45% 17%;
+    --panel-border: 258 60% 62%;
+    --paper: 0 0% 100%;
+    --paper-mat: 45 100% 98%;
+    --ink: 257 56% 12%;
+    --on-arena: 255 40% 97%;
+    --muted-on-arena: 258 22% 75%;
+    --success: 152 65% 40%;
+    --warning: 35 92% 52%;
+    --team-a: 217 91% 60%;
+    --team-b: 0 84% 60%;
   }
 
   .dark {
@@ -48,8 +64,70 @@
 @layer base {
   * {
     @apply border-border;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html {
+    overscroll-behavior: none;
   }
   body {
     @apply bg-background text-foreground;
+    overscroll-behavior: none;
+  }
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 3px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .arena-bg {
+    background:
+      radial-gradient(circle at 18% -10%, hsl(var(--arena-800) / 0.8), transparent 46%),
+      radial-gradient(circle at 90% 10%, hsl(190 90% 45% / 0.12), transparent 38%),
+      hsl(var(--arena-950));
+  }
+  .panel-arena {
+    background: hsl(var(--panel) / 0.86);
+    border: 1px solid hsl(var(--panel-border) / 0.28);
+  }
+  .text-on-arena {
+    color: hsl(var(--on-arena));
+  }
+  .text-muted-on-arena {
+    color: hsl(var(--muted-on-arena));
+  }
+  .paper-mat {
+    background: hsl(var(--paper-mat));
+  }
+  .score-number {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

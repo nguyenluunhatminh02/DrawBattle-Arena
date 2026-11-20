@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WordService } from '../word/word.service';
 import {
@@ -158,54 +159,61 @@ export class ChallengeService {
       throw new BadRequestException('Authentication required to guess');
     }
 
-    const challenge = await this.prisma.challenge.findUnique({
-      where: { id: challengeId },
-      include: { word: true, attempts: true },
-    });
-    if (!challenge) throw new NotFoundException('Challenge not found');
-    if (challenge.expiresAt < new Date()) throw new BadRequestException('Challenge expired');
-    if (!challenge.replayId) throw new BadRequestException('Challenge not finalized');
+    // Serialize the whole read-check-write under one row lock. Without this,
+    // two concurrent guesses both see the same attempt count and exceed the cap.
+    const lockKey = BigInt('0x' + createHash('sha256').update(challengeId).digest('hex').slice(0, 15));
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey})`;
 
-    const priorAttempts = challenge.attempts.filter(
-      a =>
-        (solver.userId && a.solverId === solver.userId) ||
-        (solver.sessionId && a.solverSessionId === solver.sessionId),
-    );
+      const challenge = await tx.challenge.findUnique({
+        where: { id: challengeId },
+        include: { word: true, attempts: true },
+      });
+      if (!challenge) throw new NotFoundException('Challenge not found');
+      if (challenge.expiresAt < new Date()) throw new BadRequestException('Challenge expired');
+      if (!challenge.replayId) throw new BadRequestException('Challenge not finalized');
 
-    if (priorAttempts.some(a => a.correct)) {
-      throw new BadRequestException('Already solved');
-    }
-    if (priorAttempts.length >= GAME_CONSTANTS.MAX_CHALLENGE_ATTEMPTS) {
+      const priorAttempts = challenge.attempts.filter(
+        a =>
+          (solver.userId && a.solverId === solver.userId) ||
+          (solver.sessionId && a.solverSessionId === solver.sessionId),
+      );
+
+      if (priorAttempts.some(a => a.correct)) {
+        throw new BadRequestException('Already solved');
+      }
+      if (priorAttempts.length >= GAME_CONSTANTS.MAX_CHALLENGE_ATTEMPTS) {
+        return {
+          correct: false,
+          attemptNo: priorAttempts.length,
+          remainingAttempts: 0,
+          answer: challenge.word.canonical,
+        };
+      }
+
+      const synonyms = (challenge.word.synonyms as string[]) ?? [];
+      const correct = validateGuess(answer, challenge.word.canonical, synonyms);
+      const attemptNo = priorAttempts.length + 1;
+
+      await tx.challengeAttempt.create({
+        data: {
+          challengeId,
+          solverId: solver.userId,
+          solverSessionId: solver.sessionId,
+          attemptNo,
+          answer,
+          normalized: normalizeGuess(answer),
+          correct,
+        },
+      });
+
+      const remaining = GAME_CONSTANTS.MAX_CHALLENGE_ATTEMPTS - attemptNo;
       return {
-        correct: false,
-        attemptNo: priorAttempts.length,
-        remainingAttempts: 0,
-        answer: challenge.word.canonical,
-      };
-    }
-
-    const synonyms = (challenge.word.synonyms as string[]) ?? [];
-    const correct = validateGuess(answer, challenge.word.canonical, synonyms);
-    const attemptNo = priorAttempts.length + 1;
-
-    await this.prisma.challengeAttempt.create({
-      data: {
-        challengeId,
-        solverId: solver.userId,
-        solverSessionId: solver.sessionId,
-        attemptNo,
-        answer,
-        normalized: normalizeGuess(answer),
         correct,
-      },
+        attemptNo,
+        remainingAttempts: remaining,
+        answer: correct || remaining === 0 ? challenge.word.canonical : undefined,
+      };
     });
-
-    const remaining = GAME_CONSTANTS.MAX_CHALLENGE_ATTEMPTS - attemptNo;
-    return {
-      correct,
-      attemptNo,
-      remainingAttempts: remaining,
-      answer: correct || remaining === 0 ? challenge.word.canonical : undefined,
-    };
   }
 }

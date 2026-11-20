@@ -2,6 +2,7 @@ import { Controller, Get, Post, Body, UseGuards, Req } from '@nestjs/common';
 import { DailyService } from './daily.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { OptionalAuthGuard } from '../auth/optional-auth.guard';
+import { AdminGuard } from '../../common/admin.guard';
 
 @Controller('daily')
 export class DailyController {
@@ -28,7 +29,7 @@ export class DailyController {
   }
 
   @Post('generate')
-  @UseGuards(AuthGuard)
+  @UseGuards(AdminGuard)
   async generateDailyChallenge() {
     await this.dailyService.generateDailyChallenge();
     return { success: true };

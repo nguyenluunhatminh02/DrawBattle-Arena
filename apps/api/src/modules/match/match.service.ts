@@ -68,7 +68,8 @@ export class MatchService {
         cycleNo: r.cycleNo,
         turns: r.turns.map(t => ({
           id: t.id,
-          word: t.word.canonical,
+          // Never expose the answer to anonymous callers. Private rooms keep
+          // their secret word even after the match has finished.
           difficulty: t.word.difficulty,
           drawerId: t.drawerId,
           status: t.status,

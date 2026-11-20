@@ -20,10 +20,13 @@ import { containsProfanity } from '../../common/profanity';
 
 interface AuthedSocket extends Socket {
   data: {
+    identityType?: 'guest' | 'user';
     sessionId?: string;
+    userId?: string;
     nickname?: string;
     playerId?: string;
     roomId?: string;
+    roomCode?: string;
   };
 }
 
@@ -42,6 +45,7 @@ export class GameSocketGateway
   private readonly logger = new Logger(GameSocketGateway.name);
   private readonly roomSockets = new Map<string, Map<string, AuthedSocket>>();
   private readonly disconnectTimers = new Map<string, NodeJS.Timeout>();
+  private readonly kickedSessions = new Map<string, Set<string>>();
   private readonly rateLimits = new Map<string, { count: number; resetAt: number }>();
   private rateLimitCleanupInterval: NodeJS.Timeout | null = null;
 
@@ -88,6 +92,7 @@ export class GameSocketGateway
     // Try guest token first
     const guestSession = await this.auth.validateGuestToken(token);
     if (guestSession) {
+      socket.data.identityType = 'guest';
       socket.data.sessionId = guestSession.sessionId;
       socket.data.nickname = guestSession.nickname;
       return;
@@ -96,8 +101,10 @@ export class GameSocketGateway
     // Fall back to regular JWT validation
     const userSession = await this.auth.validateUserToken(token);
     if (userSession) {
+      socket.data.identityType = 'user';
+      socket.data.userId = userSession.userId;
       socket.data.sessionId = userSession.userId;
-      socket.data.nickname = undefined;
+      socket.data.nickname = userSession.nickname;
       return;
     }
 
@@ -130,15 +137,31 @@ export class GameSocketGateway
         }
       }
       this.broadcastRoomUpdate(roomId);
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         const latestMap = this.roomSockets.get(roomId);
-        const latestSocket = latestMap?.get(playerId);
-        if (latestSocket) {
+        // Persist the departure before freeing the slot. Without this the
+        // player keeps leftAt=null in DB, occupies a slot forever and can
+        // rejoin a password-protected room without supplying the password.
+        try {
+          await this.roomService.leaveRoom(roomId, playerId);
+        } catch (err) {
+          this.logger.error(
+            'Failed to persist player departure',
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+        // Re-check after the await: a reconnect may have installed a new
+        // socket for this playerId while leaveRoom was in flight.
+        const latestMapNow = this.roomSockets.get(roomId);
+        if (latestMapNow?.has(playerId)) {
           return;
         }
         this.game.removePlayer(roomId, playerId);
         this.server.to(roomId).emit('room:playerLeft', playerId);
+        this.broadcastRoomUpdate(roomId);
         this.disconnectTimers.delete(playerId);
+        socket.data.roomId = undefined;
+        socket.data.playerId = undefined;
       }, 15_000);
       this.disconnectTimers.set(playerId, timer);
     }
@@ -153,31 +176,57 @@ export class GameSocketGateway
       if (!socket.data.sessionId || !socket.data.nickname) {
         const token = socket.handshake.auth?.token as string | undefined;
         const session = token ? await this.auth.validateGuestToken(token) : null;
-        if (!session || !session.nickname) {
-          socket.emit('error', 'UNAUTHORIZED', 'Not authenticated');
-          return;
+        if (session?.nickname) {
+          socket.data.identityType = 'guest';
+          socket.data.sessionId = session.sessionId;
+          socket.data.nickname = session.nickname;
+        } else {
+          const user = token ? await this.auth.validateUserToken(token) : null;
+          if (!user?.nickname) {
+            socket.emit('error', 'UNAUTHORIZED', 'Not authenticated');
+            return;
+          }
+          socket.data.identityType = 'user';
+          socket.data.userId = user.userId;
+          socket.data.sessionId = user.userId;
+          socket.data.nickname = user.nickname;
         }
-        socket.data.sessionId = session.sessionId;
-        socket.data.nickname = session.nickname;
       }
-      const nickname = (typeof data?.nickname === 'string' && data.nickname.trim())
-        ? data.nickname.trim().slice(0, 20)
-        : socket.data.nickname;
+
+      // Nickname is bound to the verified token. Never trust a client-supplied
+      // value here: it bypassed account-creation validation and profanity checks.
+      const nickname = socket.data.nickname;
       if (!nickname) {
         socket.emit('error', 'INVALID_PAYLOAD', 'Missing nickname');
         return;
       }
-      socket.data.nickname = nickname;
-      const room = await this.roomService.getRoomInfo(data.roomCode);
+
+      if (typeof data?.roomCode !== 'string' || !data.roomCode.trim()) {
+        socket.emit('error', 'INVALID_PAYLOAD', 'Missing room code');
+        return;
+      }
+      const roomCode = data.roomCode.trim().toUpperCase();
+
+      const room = await this.roomService.getRoomInfo(roomCode);
+      // Denylist is keyed by roomId so a kick in one room cannot ban the
+      // identity from an unrelated room that happens to reuse the code.
+      const banned = this.kickedSessions.get(room.id);
+      const identity = socket.data.sessionId || socket.data.userId;
+      if (banned && identity && banned.has(identity)) {
+        socket.emit('error', 'KICKED', 'You were kicked from this room');
+        return;
+      }
+
       const joined = await this.roomService.joinRoom(
-        data.roomCode,
+        roomCode,
         nickname,
-        socket.data.sessionId!,
-        null,
+        socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
+        socket.data.identityType === 'user' ? socket.data.userId! : null,
         typeof data.password === 'string' ? data.password : undefined,
       );
       socket.data.playerId = joined.playerId;
       socket.data.roomId = joined.roomId;
+      socket.data.roomCode = roomCode;
       socket.join(joined.roomId);
       const existingTimer = this.disconnectTimers.get(joined.playerId);
       if (existingTimer) {
@@ -212,7 +261,11 @@ export class GameSocketGateway
           this.game.addPlayer(joined.roomId, p.id, p.nicknameSnapshot);
         }
       }
-      this.game.addPlayer(joined.roomId, joined.playerId, nickname);
+      const joinedPlayer = this.game.addPlayer(joined.roomId, joined.playerId, nickname);
+      if (!joinedPlayer) {
+        socket.emit('error', 'ROOM_FULL', 'Room is full');
+        return;
+      }
 
       this.game.registerSink(joined.roomId, (event: RoomEvent) => {
         this.dispatchRoomEvent(joined.roomId, event);
@@ -234,11 +287,15 @@ export class GameSocketGateway
       this.server.to(joined.roomId).emit('room:playerJoined', {
         id: joined.playerId,
         nickname,
-        isHost: snapshot.hostId === joined.playerId,
-        isReady: false,
-        isOnline: true,
-        score: 0,
+        isHost: joinedPlayer.isHost,
+        isReady: joinedPlayer.isReady,
+        isOnline: joinedPlayer.isOnline,
+        score: joinedPlayer.score,
       });
+      // Other clients need the authoritative snapshot; incremental
+      // room:playerJoined alone can leave stale ready flags on reconnect.
+      // Broadcasts must not carry yourPlayerId, which is per-socket.
+      this.broadcastRoomUpdate(joined.roomId);
 
       const turn = this.game.getTurnSnapshot(joined.roomId);
       if (turn) {
@@ -263,7 +320,7 @@ export class GameSocketGateway
   async onRoomLeave(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
 
     const timer = this.disconnectTimers.get(playerId);
     if (timer) {
@@ -291,6 +348,7 @@ export class GameSocketGateway
     this.broadcastRoomUpdate(roomId);
     socket.emit('room:left');
     socket.data.roomId = undefined;
+    socket.data.roomCode = undefined;
     socket.data.playerId = undefined;
   }
 
@@ -308,7 +366,7 @@ export class GameSocketGateway
   async onStart(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (!this.game.isHost(roomId, playerId)) {
       socket.emit('error', 'NOT_HOST', 'Only host can start');
       return;
@@ -328,7 +386,7 @@ export class GameSocketGateway
   async onRematch(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (!this.game.isHost(roomId, playerId)) {
       socket.emit('error', 'NOT_HOST', 'Only host can rematch');
       return;
@@ -351,7 +409,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     const ok = await this.game.chooseWord(roomId, playerId, wordId);
     if (!ok) socket.emit('error', 'INVALID_WORD', 'Cannot choose word');
   }
@@ -363,7 +421,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (!data || typeof data.turnId !== 'string' || typeof data.strokeId !== 'string') {
       socket.emit('error', 'INVALID_PAYLOAD', 'Invalid stroke start');
       return;
@@ -381,7 +439,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (!this.checkSocketRateLimit(socket, 'stroke', 30, 1000)) return;
     if (
       !chunk ||
@@ -410,7 +468,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (!data || typeof data.turnId !== 'string' || typeof data.strokeId !== 'string') {
       socket.emit('error', 'INVALID_PAYLOAD', 'Invalid stroke end');
       return;
@@ -425,7 +483,7 @@ export class GameSocketGateway
   onDrawClear(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     this.game.clearCanvas(roomId, playerId);
   }
 
@@ -436,7 +494,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (typeof guess !== 'string' || guess.length === 0 || guess.length > 100) {
       socket.emit('error', 'INVALID_PAYLOAD', 'Invalid guess');
       return;
@@ -460,7 +518,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (typeof message !== 'string' || message.length === 0 || message.length > 200) {
       return;
     }
@@ -480,28 +538,79 @@ export class GameSocketGateway
   onDrawUndo(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     this.game.undoStroke(roomId, playerId);
   }
 
   @SubscribeMessage('room:hostAction')
-  onHostAction(
+  async onHostAction(
     @ConnectedSocket() socket: AuthedSocket,
     @MessageBody() data: { action: 'kick' | 'mute' | 'transferHost'; targetId: string },
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
     if (!roomId || !playerId || !data?.targetId) return;
+    if (!this.isActiveMember(socket, roomId, playerId)) return;
     if (!this.game.isHost(roomId, playerId)) {
       socket.emit('error', 'NOT_HOST', 'Only host can perform this action');
       return;
     }
     switch (data.action) {
-      case 'kick':
+      case 'kick': {
+        const targetSocket = this.roomSockets.get(roomId)?.get(data.targetId);
+        // Resolve identity before removal: offline targets have no socket, and
+        // without a persisted ban they could rejoin with a fresh session.
+        let targetSessionId: string | undefined = targetSocket?.data.sessionId;
+        let targetUserId: string | undefined = targetSocket?.data.userId;
+        if (!targetSessionId && !targetUserId) {
+          try {
+            const dbRoom = await this.roomService.getRoomById(roomId);
+            const targetPlayer = dbRoom.players.find(p => p.id === data.targetId);
+            targetSessionId = targetPlayer?.guestSessionId ?? undefined;
+            targetUserId = targetPlayer?.userId ?? undefined;
+          } catch (err) {
+            this.logger.error(
+              'Failed to resolve kicked player identity',
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
         if (!this.game.kickPlayer(roomId, playerId, data.targetId)) {
           socket.emit('error', 'KICK_FAILED', 'Cannot kick player');
+          break;
         }
+        // Key the denylist by roomId so a kick does not ban the identity from
+        // an unrelated room that happens to reuse the same code.
+        if (targetSessionId || targetUserId) {
+          const banned = this.kickedSessions.get(roomId) ?? new Set<string>();
+          if (targetSessionId) banned.add(targetSessionId);
+          if (targetUserId) banned.add(targetUserId);
+          this.kickedSessions.set(roomId, banned);
+        }
+        const timer = this.disconnectTimers.get(data.targetId);
+        if (timer) {
+          clearTimeout(timer);
+          this.disconnectTimers.delete(data.targetId);
+        }
+        this.roomSockets.get(roomId)?.delete(data.targetId);
+        if (targetSocket) {
+          targetSocket.leave(roomId);
+          targetSocket.emit('room:kicked', { roomCode: socket.data.roomCode });
+          targetSocket.data.roomId = undefined;
+          targetSocket.data.roomCode = undefined;
+          targetSocket.data.playerId = undefined;
+        }
+        try {
+          await this.roomService.leaveRoom(roomId, data.targetId);
+        } catch (err) {
+          this.logger.error(
+            'Failed to persist kicked player',
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+        this.broadcastRoomUpdate(roomId);
         break;
+      }
       case 'mute':
         if (!this.game.mutePlayer(roomId, playerId, data.targetId, true)) {
           socket.emit('error', 'MUTE_FAILED', 'Cannot mute player');
@@ -529,7 +638,7 @@ export class GameSocketGateway
   ) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     if (!this.game.isHost(roomId, playerId)) {
       socket.emit('error', 'NOT_HOST', 'Only host can update settings');
       return;
@@ -544,7 +653,7 @@ export class GameSocketGateway
   onResync(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     const snapshot = this.game.getSnapshot(roomId);
     if (snapshot) {
       socket.emit('room:snapshot', { ...snapshot, yourPlayerId: playerId });
@@ -553,6 +662,12 @@ export class GameSocketGateway
     if (turn) socket.emit('turn:restore', turn);
     const word = this.game.getDrawerWord(roomId, playerId);
     if (word) socket.emit('turn:yourWord', { word });
+  }
+
+  private isActiveMember(socket: AuthedSocket, roomId: string, playerId: string): boolean {
+    if (!socket.rooms.has(roomId)) return false;
+    const snapshot = this.game.getSnapshot(roomId);
+    return !!snapshot?.players.some(p => p.id === playerId);
   }
 
   private dispatchRoomEvent(roomId: string, event: RoomEvent) {
@@ -603,5 +718,6 @@ export class GameSocketGateway
     this.disconnectTimers.clear();
     this.rateLimits.clear();
     this.roomSockets.clear();
+    this.kickedSessions.clear();
   }
 }

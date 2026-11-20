@@ -13,6 +13,17 @@ async function bootstrap() {
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
+  // The API runs behind a Next.js rewrite in production and behind a Cloudflare
+  // tunnel in deployment. Express must trust the configured proxy hop count so
+  // req.ip is derived from trusted X-Forwarded-For processing rather than the
+  // raw socket address; otherwise every user shares one rate-limit bucket.
+  // TRUST_PROXY env is always a string; parse numeric hop counts correctly.
+  const trustProxy = process.env.TRUST_PROXY;
+  const parsedTrustProxy = trustProxy
+    ? (Number.isNaN(Number(trustProxy)) ? trustProxy : Number(trustProxy))
+    : 1;
+  app.set('trust proxy', parsedTrustProxy);
+
   const origins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
     .split(',')
     .map(o => o.trim());

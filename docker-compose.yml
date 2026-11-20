@@ -45,10 +45,11 @@ services:
     environment:
       DATABASE_URL: postgresql://drawbattle:drawbattle@postgres:5432/drawbattle?schema=public
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET environment variable is required. Generate with: openssl rand -hex 32}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET environment variable is required - generate with openssl rand -hex 32}
       JWT_EXPIRES_IN: 7d
       PORT: 3001
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3002}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
       NODE_ENV: production
     ports:
       - '3001:3001'

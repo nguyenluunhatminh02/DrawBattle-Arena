@@ -39,7 +39,15 @@ export class ThrottleGuard implements CanActivate {
     if (!config) return true;
 
     const request = context.switchToHttp().getRequest();
-    const ip = request.ip ?? request.socket?.remoteAddress ?? 'unknown';
+    // Never key on a raw client-supplied header (CF-Connecting-IP /
+    // X-Forwarded-For): it is spoofable unless the trusted edge overwrites it.
+    // Express resolves req.ip from trusted proxy hops via `trust proxy`.
+    const identity =
+      (request.user as { id?: string } | undefined)?.id ??
+      (request.guest as { sessionId?: string } | undefined)?.sessionId;
+    const ip = identity
+      ? `identity:${identity}`
+      : request.ip ?? request.socket?.remoteAddress ?? 'unknown';
     const key = `${config.keyPrefix ?? 'global'}:${ip}`;
     const now = Date.now();
 

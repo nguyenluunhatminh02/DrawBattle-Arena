@@ -67,10 +67,18 @@ export class AuthService {
   async validateUserToken(token: string) {
     try {
       const payload = this.jwt.verify(token);
-      if (payload.type === 'guest') return null;
+      if (payload.type !== 'user') return null;
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: payload.sub },
+        select: { id: true, nickname: true, role: true },
+      });
+      if (!user) return null;
 
       return {
-        userId: payload.sub,
+        userId: user.id,
+        nickname: user.nickname,
+        role: user.role,
         type: payload.type,
       };
     } catch {

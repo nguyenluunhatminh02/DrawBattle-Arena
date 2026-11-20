@@ -7,14 +7,20 @@ import type { Response } from 'express';
 export class ReplayController {
   constructor(private readonly replayService: ReplayService) {}
 
-  @Get(':id')
-  async getReplay(@Param('id') id: string) {
-    return this.replayService.getReplay(id);
+  // Specific routes must be declared before /:id so Nest does not shadow them.
+  @Get('stats')
+  async stats() {
+    return this.replayService.getStats();
   }
 
   @Get('turn/:turnId')
   async getByTurn(@Param('turnId') turnId: string) {
     return this.replayService.getReplayByTurn(turnId);
+  }
+
+  @Get(':id')
+  async getReplay(@Param('id') id: string) {
+    return this.replayService.getReplay(id);
   }
 
   @Post(':id/render')
@@ -30,10 +36,5 @@ export class ReplayController {
       return res.status(404).json({ message: 'GIF not yet rendered' });
     }
     return res.redirect(replay.gifUrl);
-  }
-
-  @Get()
-  async stats() {
-    return this.replayService.getStats();
   }
 }

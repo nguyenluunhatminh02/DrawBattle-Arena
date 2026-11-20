@@ -26,6 +26,7 @@ export interface ServerToClientEvents {
   'room:left': () => void;
   'room:hostChanged': (newHostId: string) => void;
   'room:playerKicked': (data: { playerId: string }) => void;
+  'room:kicked': (data: { roomCode?: string }) => void;
   'room:playerMuted': (data: { playerId: string; muted: boolean }) => void;
   'match:started': (data: { matchId: string; round: number; totalRounds: number; drawerOrder?: Array<{ id: string; nickname: string }> }) => void;
   'match:teams': (data: TeamsPayload) => void;
