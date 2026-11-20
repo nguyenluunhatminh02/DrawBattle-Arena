@@ -182,7 +182,8 @@ export class GameStateService {
   addPlayer(roomId: string, id: string, nickname: string): PlayerInfo | null {
     const room = this.rooms.get(roomId);
     if (!room) return null;
-    if (room.players.size >= room.settings.maxPlayers) return null;
+    // Reconnects must bypass capacity: the slot is already occupied by this
+    // identity, and rejecting it would roll back the player's DB row.
     if (room.players.has(id)) {
       const p = room.players.get(id)!;
       p.isOnline = true;
@@ -206,6 +207,7 @@ export class GameStateService {
       }
       return this.toPlayerInfo(p);
     }
+    if (room.players.size >= room.settings.maxPlayers) return null;
     const player: PlayerState = {
       id,
       nickname,

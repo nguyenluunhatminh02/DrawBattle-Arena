@@ -7,7 +7,11 @@ export class MatchService {
 
   async listMatches(limit: number, offset: number) {
     const matches = await this.prisma.match.findMany({
-      where: { status: 'FINISHED' },
+      where: {
+        status: 'FINISHED',
+        // Public history must never enumerate PRIVATE room codes.
+        room: { visibility: { in: ['PUBLIC', 'UNLISTED'] } },
+      },
       orderBy: { endedAt: 'desc' },
       take: Math.min(limit, 50),
       skip: offset,
@@ -44,7 +48,7 @@ export class MatchService {
           include: { player: { select: { id: true, nicknameSnapshot: true } } },
           orderBy: { points: 'desc' },
         },
-        room: { select: { code: true } },
+        room: { select: { code: true, visibility: true } },
         rounds: {
           include: {
             turns: {
@@ -57,6 +61,7 @@ export class MatchService {
       },
     });
     if (!match) throw new NotFoundException('Match not found');
+    if (match.room.visibility === 'PRIVATE') throw new NotFoundException('Match not found');
 
     return {
       id: match.id,
@@ -93,10 +98,11 @@ export class MatchService {
           include: { player: { select: { id: true, nicknameSnapshot: true } } },
           orderBy: { points: 'desc' },
         },
-        room: { select: { code: true } },
+        room: { select: { code: true, visibility: true } },
       },
     });
     if (!match) throw new NotFoundException('Match not found');
+    if (match.room.visibility === 'PRIVATE') throw new NotFoundException('Match not found');
 
     const rankings = match.scores.map((s, idx) => ({
       playerId: s.player.id,

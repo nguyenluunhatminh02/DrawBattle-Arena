@@ -53,7 +53,10 @@ services:
       # Production-safe placeholder (no localhost fallback); override with the
       # public site URL for staging/development, e.g. CORS_ORIGIN=http://localhost:3002.
       CORS_ORIGIN: ${CORS_ORIGIN:-https://drawbattle.caphesuachua.blog}
-      TRUST_PROXY: ${TRUST_PROXY:-1}
+      # Do not trust X-Forwarded-For by default. Set explicitly to the number
+      # of trusted proxy hops (or a CIDR) in environments that terminate TLS in
+      # front of the API. This prevents direct callers from splitting throttle buckets.
+      TRUST_PROXY: ${TRUST_PROXY:-0}
       NODE_ENV: production
     ports:
       - '3001:3001'

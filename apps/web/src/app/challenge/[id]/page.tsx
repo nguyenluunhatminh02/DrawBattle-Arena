@@ -24,6 +24,7 @@ export default function ChallengePlayPage() {
   const router = useRouter();
   const id = params.id as string;
   const player = useGameStore(s => s.player);
+  const authToken = useGameStore(s => s.token);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -40,6 +41,24 @@ export default function ChallengePlayPage() {
   const [remaining, setRemaining] = useState(3);
   const [result, setResult] = useState<{ correct: boolean; answer?: string } | null>(null);
   const [guessing, setGuessing] = useState(false);
+  const [guessError, setGuessError] = useState<string | null>(null);
+
+  // A fresh visitor who opens a shared challenge link has no identity yet.
+  // Provision a guest session so guesses are attributed to them instead of
+  // failing with "Authentication required to guess".
+  useEffect(() => {
+    if (authToken || player?.token) return;
+    const auto = useGameStore.getState().player;
+    if (auto?.token) return;
+    const nickname = `Player_${Math.floor(1000 + Math.random() * 9000)}`;
+    api.createGuest(nickname)
+      .then(session => useGameStore.getState().setPlayer({
+        token: session.token,
+        playerId: session.playerId,
+        nickname,
+      }))
+      .catch(() => setGuessError('Không thể khởi tạo phiên chơi. Vui lòng tải lại trang.'));
+  }, [authToken, player?.token]);
 
   useEffect(() => {
     api.getChallengeInfo(id, player?.token).then(info => {
@@ -54,13 +73,14 @@ export default function ChallengePlayPage() {
       }
       setReplay(info.replay.strokes as ReplayStroke[]);
       setDurationMs(info.replay.durationMs);
-      setRemaining(info.maxAttempts - info.attemptCount);
+      // attemptCount is global across all solvers; only myAttempts limits us.
+      setRemaining(info.maxAttempts - info.myAttempts);
       setLoaded(true);
     }).catch(() => {
       setLoading(false);
       setLoadError('Không tải được thách thức. Vui lòng kiểm tra liên kết và thử lại.');
     });
-  }, [id]);
+  }, [id, player?.token]);
 
   const drawFrame = useCallback(
     (strokesToRender: ReplayStroke[]) => {
@@ -149,15 +169,18 @@ export default function ChallengePlayPage() {
   async function handleGuess() {
     if (!answer.trim() || remaining <= 0) return;
     setGuessing(true);
+    setGuessError(null);
     try {
       const res = await api.submitChallengeGuess(id, answer.trim(), player?.token);
       setAttemptNo(res.attemptNo);
       setRemaining(res.remainingAttempts);
       setResult({ correct: res.correct, answer: res.answer });
       setAnswer('');
-    } catch {
+    } catch (err) {
+      setGuessError(err instanceof Error ? err.message : 'Không gửi được đáp án. Vui lòng thử lại.');
+    } finally {
+      setGuessing(false);
     }
-    setGuessing(false);
   }
 
   function StateCard({
@@ -320,6 +343,9 @@ export default function ChallengePlayPage() {
                 <p role="status" aria-live="polite" className="text-center text-sm text-warning">
                   Sai rồi! Còn {remaining} lượt. Thử lại nào!
                 </p>
+              )}
+              {guessError && (
+                <p role="alert" className="text-center text-sm text-danger-on-arena">{guessError}</p>
               )}
               <form
                 className="flex flex-col gap-2 sm:flex-row"

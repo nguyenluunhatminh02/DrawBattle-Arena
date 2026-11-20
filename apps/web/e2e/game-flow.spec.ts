@@ -187,6 +187,58 @@ test.describe('Quick Challenge', () => {
       { timeout: 40000 },
     );
   });
+
+  test('fresh visitor can bootstrap identity and guess on a shared link', async ({ browser }) => {
+    test.setTimeout(120000);
+    const ctx = await browser.newContext();
+    const author = await setupPlayer(ctx, 'ChallengeAuthor');
+    await author.goto(WEB);
+    await author.waitForSelector('main[data-ready="true"]', { timeout: 15000 });
+    await author.getByPlaceholder('Nhập tên của bạn...').fill('ChallengeAuthor');
+    await author.waitForFunction(
+      () => {
+        const btn = Array.from(document.querySelectorAll('button')).find(b =>
+          b.textContent?.includes('Thách bạn bè'),
+        );
+        return !!btn && !(btn as HTMLButtonElement).disabled;
+      },
+      null,
+      { timeout: 5000 },
+    );
+    await author.locator('button', { hasText: 'Thách bạn bè' }).click();
+    await author.waitForURL(/\/challenge\/create/, { timeout: 15000 });
+    await author.getByRole('button', { name: 'Bắt đầu vẽ' }).click();
+    const wordEl = author.locator('[aria-live="polite"]').first();
+    await expect(wordEl).toBeVisible({ timeout: 10000 });
+    await expect(wordEl).not.toHaveText('', { timeout: 10000 });
+    const word = (await wordEl.textContent())!.trim();
+    await author.waitForFunction(
+      () =>
+        document.body.innerText.includes('Tạo thách thức thành công!') ||
+        document.body.innerText.includes('Sao chép liên kết'),
+      null,
+      { timeout: 40000 },
+    );
+
+    // Challenge completion renders the absolute share URL as text with a copy
+    // button, not as an anchor. Extract that URL from the visible paragraph.
+    const shareText = await author.evaluate(() => {
+      const match = document.body.innerText.match(/https?:\/\/[^\s]+\/challenge\/[A-Za-z0-9_-]+/);
+      return match?.[0] ?? null;
+    });
+    expect(shareText).toBeTruthy();
+
+    const freshCtx = await browser.newContext();
+    const visitor = await freshCtx.newPage();
+    await visitor.goto(shareText!);
+    await expect(visitor.getByPlaceholder('Nhập đáp án...')).toBeVisible({ timeout: 20000 });
+    await visitor.getByPlaceholder('Nhập đáp án...').fill(word);
+    await visitor.getByRole('button', { name: 'Đoán' }).click();
+    await expect(visitor.getByText('Chính xác!')).toBeVisible({ timeout: 15000 });
+
+    await freshCtx.close();
+    await ctx.close();
+  });
 });
 
 test.describe('Profanity Filter', () => {
