@@ -109,6 +109,8 @@ test.describe('E2E regression matrix', () => {
     });
     const canvas = page.getByTestId('daily-replay-canvas');
     await expect(canvas).toBeVisible();
+    // The canvas is sized by a ResizeObserver; wait for the first resize pass.
+    await expect.poll(async () => canvas.evaluate((el: HTMLCanvasElement) => el.width)).toBeGreaterThan(0);
     // A real drawing must be painted, not an empty white canvas.
     const painted = await canvas.evaluate((el: HTMLCanvasElement) => {
       const ctx = el.getContext('2d')!;
