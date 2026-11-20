@@ -20,11 +20,17 @@ export class ReplayWorker {
   ) {}
 
   /**
-   * Public queue path. The job service performs the atomic state transition
-   * before any worker starts, so repeated calls cannot duplicate a render.
+   * Public queue path. The job service only enqueues; this worker claims and
+   * executes the job. Repeated calls cannot duplicate a render because
+   * activeJobs is keyed by job id and claimNext is atomic.
    */
   async queueRender(replayId: string, strokes: any[], durationMs: number) {
-    return this.jobs.queueReplay(replayId);
+    const queued = await this.jobs.queueReplay(replayId);
+    if (queued.status === 'queued' && this.activeJobs.size < this.MAX_CONCURRENT) {
+      const claimed = await this.jobs.claim(queued.jobId);
+      if (claimed && claimed.replayId === replayId) this.startJob(claimed);
+    }
+    return queued;
   }
 
   @Cron(CronExpression.EVERY_MINUTE)

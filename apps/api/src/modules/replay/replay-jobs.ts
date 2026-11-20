@@ -304,19 +304,35 @@ export class PrismaJobStore implements JobStore {
 
   async claimNext(holder: string, now: Date) {
     const staleCutoff = new Date(now.getTime() - RUNNING_LEASE_MS);
-    const where = {
-      OR: [
-        { state: 'queued', nextAttemptAt: { lte: now } },
-        { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
-      ],
-    };
+    // Claim exactly one job. The guarded UPDATE matches at most one row; using
+    // updateMany with a broad OR condition previously marked unrelated jobs as
+    // running even though no worker received them.
+    const candidates = await this.prisma.renderJob.findMany({
+      where: {
+        OR: [
+          { state: 'queued', nextAttemptAt: { lte: now } },
+          { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
+        ],
+      },
+      orderBy: { nextAttemptAt: 'asc' },
+      take: 1,
+    });
+    const candidate = candidates[0];
+    if (!candidate) return null;
+
     const claimed = await this.prisma.renderJob.updateMany({
-      where: where as never,
+      where: {
+        id: candidate.id,
+        OR: [
+          { state: 'queued', nextAttemptAt: { lte: now } },
+          { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
+        ],
+      },
       data: { state: 'running', lockedBy: holder, lockedAt: now, updatedAt: now },
     });
     if (claimed.count === 0) return null;
-    const row = await this.prisma.renderJob.findFirst({ where: { lockedBy: holder, lockedAt: now } });
-    return row ? normalize(row) : null;
+    const row = await this.prisma.renderJob.findUnique({ where: { id: candidate.id } });
+    return row && row.lockedBy === holder ? normalize(row) : null;
   }
 
   async markRunning(jobId: string, holder: string, now: Date) {
@@ -418,7 +434,6 @@ export class ReplayJobService {
 
     const now = new Date();
     let job = await this.store.findByReplay(replayId);
-    const exists = !!job;
     if (!job) job = await this.store.create(replayId, now);
     if (job.state === 'completed') return { jobId: job.id, status: 'completed' };
     if (job.state === 'failed') {
@@ -432,13 +447,10 @@ export class ReplayJobService {
         job: toSnapshot(job),
       });
     }
-    const claimed = exists
-      ? await this.store.markRunning(job.id, this.holder, now)
-      : await this.store.claimNext(this.holder, now);
-    if (!claimed || claimed.id !== job.id) {
-      throw new ConflictException('A render is already running for this replay');
-    }
-    return { jobId: job.id, status: 'running' };
+    // Queueing must leave the job claimable. The worker owns the transition to
+    // running; otherwise a job could sit in `running` with no worker executing
+    // it until the lease expires.
+    return { jobId: job.id, status: 'queued' };
   }
 
   /** Atomically claims the next claimable job for this worker instance. */
