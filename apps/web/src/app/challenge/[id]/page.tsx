@@ -25,6 +25,8 @@ export default function ChallengePlayPage() {
   const id = params.id as string;
   const player = useGameStore(s => s.player);
   const authToken = useGameStore(s => s.token);
+  // An account token always wins; guest tokens are only a fallback.
+  const activeToken = authToken ?? player?.token;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -42,12 +44,13 @@ export default function ChallengePlayPage() {
   const [result, setResult] = useState<{ correct: boolean; answer?: string } | null>(null);
   const [guessing, setGuessing] = useState(false);
   const [guessError, setGuessError] = useState<string | null>(null);
+  const [answerCanonical, setAnswerCanonical] = useState<string | null>(null);
 
   // A fresh visitor who opens a shared challenge link has no identity yet.
   // Provision a guest session so guesses are attributed to them instead of
   // failing with "Authentication required to guess".
   useEffect(() => {
-    if (authToken || player?.token) return;
+    if (activeToken) return;
     const auto = useGameStore.getState().player;
     if (auto?.token) return;
     const nickname = `Player_${Math.floor(1000 + Math.random() * 9000)}`;
@@ -58,10 +61,10 @@ export default function ChallengePlayPage() {
         nickname,
       }))
       .catch(() => setGuessError('Không thể khởi tạo phiên chơi. Vui lòng tải lại trang.'));
-  }, [authToken, player?.token]);
+  }, [activeToken]);
 
   useEffect(() => {
-    api.getChallengeInfo(id, player?.token).then(info => {
+    api.getChallengeInfo(id, activeToken).then(info => {
       setLoading(false);
       if (info.status === 'EXPIRED') {
         setExpired(true);
@@ -74,13 +77,19 @@ export default function ChallengePlayPage() {
       setReplay(info.replay.strokes as ReplayStroke[]);
       setDurationMs(info.replay.durationMs);
       // attemptCount is global across all solvers; only myAttempts limits us.
+      setAttemptNo(info.myAttempts);
       setRemaining(info.maxAttempts - info.myAttempts);
+      // CH-01: restore the solved state when this identity revisits the link.
+      if (info.mySolved) {
+        setResult({ correct: true, answer: info.answerCanonical });
+        setAnswerCanonical(info.answerCanonical ?? null);
+      }
       setLoaded(true);
     }).catch(() => {
       setLoading(false);
       setLoadError('Không tải được thách thức. Vui lòng kiểm tra liên kết và thử lại.');
     });
-  }, [id, player?.token]);
+  }, [id, activeToken]);
 
   const drawFrame = useCallback(
     (strokesToRender: ReplayStroke[]) => {
@@ -171,13 +180,17 @@ export default function ChallengePlayPage() {
     setGuessing(true);
     setGuessError(null);
     try {
-      const res = await api.submitChallengeGuess(id, answer.trim(), player?.token);
+      const res = await api.submitChallengeGuess(id, answer.trim(), activeToken);
       setAttemptNo(res.attemptNo);
       setRemaining(res.remainingAttempts);
       setResult({ correct: res.correct, answer: res.answer });
+      if (res.answer) setAnswerCanonical(res.answer);
       setAnswer('');
     } catch (err) {
-      setGuessError(err instanceof Error ? err.message : 'Không gửi được đáp án. Vui lòng thử lại.');
+      // CH-02: always show the server's message (already solved, expired,
+      // rate limited, invalid payload, ...) instead of swallowing it.
+      const raw = err instanceof Error ? err.message : '';
+      setGuessError(raw.trim() || 'Không gửi được đáp án. Vui lòng kiểm tra kết nối và thử lại.');
     } finally {
       setGuessing(false);
     }
@@ -311,9 +324,9 @@ export default function ChallengePlayPage() {
               </div>
               <div className="space-y-1" role="status" aria-live="polite">
                 <h2 className="text-xl font-bold">{solved ? 'Chính xác!' : 'Hết lượt đoán'}</h2>
-                {result?.answer ? (
+                {result?.answer ?? answerCanonical ? (
                   <p className="text-lg">
-                    Đáp án: <strong className="text-primary-foreground">{result.answer}</strong>
+                    Đáp án: <strong className="text-primary-foreground">{result?.answer ?? answerCanonical}</strong>
                   </p>
                 ) : (
                   <p className="text-sm text-muted-on-arena">Bạn đã dùng hết lượt đoán cho thách thức này.</p>

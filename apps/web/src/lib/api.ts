@@ -26,7 +26,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(body.message || `HTTP ${res.status}`);
+      // Nest ValidationPipe returns an array of messages; render every one so
+      // the player sees exactly why a guess or payload was rejected.
+      const message = Array.isArray(body.message)
+        ? body.message.join('; ')
+        : body.message || `HTTP ${res.status}`;
+      throw new Error(message);
     }
     if (res.status === 204) return undefined as T;
     const text = await res.text();
@@ -102,8 +107,35 @@ export const api = {
       replay: { strokes: unknown; durationMs: number } | null;
       attemptCount: number;
       myAttempts: number;
+      mySolved: boolean;
+      answerCanonical?: string;
       maxAttempts: number;
     }>(`/challenges/${id}`, { headers: token ? authed(token) : undefined });
+  },
+
+  getDailyToday(token?: string) {
+    return request<{
+      id: string;
+      date: string;
+      word: { id: string; canonical: string; difficulty: string; category?: { name: string } };
+      replay: { strokes: unknown; durationMs: number } | null;
+      answerCanonical?: string;
+      userAttempt: { id: string; correct: boolean; answer: string } | null;
+      stats: { totalAttempts: number; correctAttempts: number; successRate: number };
+    }>('/daily/today', { headers: token ? authed(token) : undefined });
+  },
+
+  submitDailyAnswer(challengeId: string, answer: string, token?: string) {
+    return request<{
+      attempt: { id: string; correct: boolean };
+      correct: boolean;
+      remainingAttempts: number;
+      answerCanonical?: string;
+    }>('/daily/submit', {
+      method: 'POST',
+      headers: token ? authed(token) : undefined,
+      body: JSON.stringify({ challengeId, answer }),
+    });
   },
 
   submitChallengeGuess(id: string, answer: string, token?: string) {

@@ -4,6 +4,7 @@ import { Throttle } from '../../common/throttle.guard';
 import { OptionalAuthGuard } from '../auth/optional-auth.guard';
 import type { WordDifficulty } from '@drawbattle/shared';
 import type { Identity } from './challenge.service';
+import { FinalizeChallengeDto, SubmitChallengeGuessDto } from './challenge.dto';
 
 @Controller('challenges')
 export class ChallengeController {
@@ -13,9 +14,10 @@ export class ChallengeController {
   @UseGuards(OptionalAuthGuard)
   @Throttle({ limit: 10, windowMs: 60_000, keyPrefix: 'challenge-create' })
   create(@Body() body: { difficulty?: WordDifficulty; category?: string; wordId?: string }, @Req() req: any) {
+    const userId = req.user?.id;
     const creator: Identity = {
-      userId: req.user?.id,
-      sessionId: req.guest?.sessionId,
+      userId,
+      sessionId: userId ? undefined : req.guest?.sessionId,
     };
     return this.challenge.create(body, creator);
   }
@@ -25,20 +27,12 @@ export class ChallengeController {
   finalize(
     @Param('id') id: string,
     @Req() req: any,
-    @Body()
-    body: {
-      strokes: Array<{
-        strokeId: string;
-        points: Array<{ x: number; y: number }>;
-        color: string;
-        width: number;
-      }>;
-      durationMs: number;
-    },
+    @Body() body: FinalizeChallengeDto,
   ) {
+    const userId = req.user?.id;
     const actor: Identity = {
-      userId: req.user?.id,
-      sessionId: req.guest?.sessionId,
+      userId,
+      sessionId: userId ? undefined : req.guest?.sessionId,
     };
     return this.challenge.finalize(id, body.strokes, body.durationMs, actor);
   }
@@ -46,9 +40,10 @@ export class ChallengeController {
   @Get(':id')
   @UseGuards(OptionalAuthGuard)
   info(@Param('id') id: string, @Req() req: any) {
+    const userId = req.user?.id;
     const solver: Identity = {
-      userId: req.user?.id,
-      sessionId: req.guest?.sessionId,
+      userId,
+      sessionId: userId ? undefined : req.guest?.sessionId,
     };
     return this.challenge.getInfo(id, solver);
   }
@@ -59,11 +54,12 @@ export class ChallengeController {
   submitGuess(
     @Param('id') id: string,
     @Req() req: any,
-    @Body() body: { answer: string },
+    @Body() body: SubmitChallengeGuessDto,
   ) {
+    const userId = req.user?.id;
     const solver: Identity = {
-      userId: req.user?.id,
-      sessionId: req.guest?.sessionId,
+      userId,
+      sessionId: userId ? undefined : req.guest?.sessionId,
     };
     return this.challenge.submitGuess(id, body.answer, solver);
   }

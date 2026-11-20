@@ -1,18 +1,49 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { normalizeGuess, validateGuess } from '@drawbattle/shared';
+
+const VIETNAM_TIME_ZONE = 'Asia/Ho_Chi_Minh';
+const MAX_DAILY_ATTEMPTS = 10;
+const DAILY_ATTEMPT_COOLDOWN_MS = 1000;
+
+/**
+ * DAILY-06: the daily boundary must be midnight in Asia/Ho_Chi_Minh (UTC+7),
+ * not midnight in the API host's timezone. Return the UTC instant of today's
+ * local midnight as a Date with no time component (Prisma @db.Date column).
+ */
+export function getVietnamToday(date: Date = new Date()): Date {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: VIETNAM_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = formatter.formatToParts(date);
+  const part = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+  const year = Number(part('year'));
+  const month = Number(part('month'));
+  const day = Number(part('day'));
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function previousVietnamDay(today: Date): Date {
+  const previous = new Date(today);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  return previous;
+}
 
 @Injectable()
 export class DailyService {
   constructor(private prisma: PrismaService) {}
 
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  // UTC 17:00 is midnight in Asia/Ho_Chi_Minh (UTC+7, no DST). On-demand
+  // generation in getTodaysChallenge covers downtime around that boundary.
+  @Cron('0 17 * * *')
   async generateDailyChallenge() {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = getVietnamToday();
 
     const lockKey = BigInt('0x' + createHash('sha256').update(`daily:${today.toISOString()}`).digest('hex').slice(0, 15));
     await this.prisma.$transaction(async tx => {
@@ -40,67 +71,44 @@ export class DailyService {
   }
 
   async getTodaysChallenge(userId?: string, guestSessionId?: string): Promise<any> {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = getVietnamToday();
 
-    let challenge = await this.prisma.dailyChallenge.findUnique({
-      where: { date: today },
-      include: {
-        word: {
-          select: {
-            id: true,
-            difficulty: true,
-            category: { select: { name: true } },
-          },
-        },
-        replay: true,
-      },
-    });
-
+    let challenge = await this.findChallenge(today);
     if (!challenge) {
       await this.generateDailyChallenge();
-      challenge = await this.prisma.dailyChallenge.findUnique({
-        where: { date: today },
-        include: {
-          word: {
-            select: {
-              id: true,
-              difficulty: true,
-              category: { select: { name: true } },
-            },
-          },
-          replay: true,
-        },
-      });
+      challenge = await this.findChallenge(today);
     }
-
     if (!challenge) {
       throw new BadRequestException('Daily challenge unavailable');
     }
 
-    let userAttempt = null;
-    if (userId) {
-      userAttempt = await this.prisma.dailyChallengeAttempt.findFirst({
-        where: { dailyChallengeId: challenge.id, userId },
-        orderBy: { createdAt: 'desc' },
-      });
-    } else if (guestSessionId) {
-      userAttempt = await this.prisma.dailyChallengeAttempt.findFirst({
-        where: { dailyChallengeId: challenge.id, guestSessionId },
-        orderBy: { createdAt: 'desc' },
-      });
-    }
+    // DAILY-05: an authenticated user's history must never be attributed to a
+    // guest token (and vice versa). The controller already normalises the
+    // identity; keep the predicate here explicit as a defence in depth.
+    const identityWhere = userId
+      ? { userId }
+      : guestSessionId
+        ? { guestSessionId }
+        : null;
 
-    const totalAttempts = await this.prisma.dailyChallengeAttempt.count({
-      where: { dailyChallengeId: challenge.id },
-    });
-
-    const correctAttempts = await this.prisma.dailyChallengeAttempt.count({
-      where: { dailyChallengeId: challenge.id, correct: true },
-    });
+    const [userAttempt, totalAttempts, correctAttempts] = await Promise.all([
+      identityWhere
+        ? this.prisma.dailyChallengeAttempt.findFirst({
+            where: { dailyChallengeId: challenge.id, ...identityWhere },
+            orderBy: { createdAt: 'desc' },
+          })
+        : Promise.resolve(null),
+      this.prisma.dailyChallengeAttempt.count({ where: { dailyChallengeId: challenge.id } }),
+      this.prisma.dailyChallengeAttempt.count({
+        where: { dailyChallengeId: challenge.id, correct: true },
+      }),
+    ]);
 
     return {
       ...challenge,
+      // DAILY-02: expose the canonical answer so a finished game can show it
+      // without leaking it to players who have not solved today's challenge.
+      answerCanonical: userAttempt?.correct ? challenge.word.canonical : undefined,
       userAttempt,
       stats: {
         totalAttempts,
@@ -108,6 +116,23 @@ export class DailyService {
         successRate: totalAttempts > 0 ? (correctAttempts / totalAttempts) * 100 : 0,
       },
     };
+  }
+
+  private findChallenge(today: Date) {
+    return this.prisma.dailyChallenge.findUnique({
+      where: { date: today },
+      include: {
+        word: {
+          select: {
+            id: true,
+            canonical: true,
+            difficulty: true,
+            category: { select: { name: true } },
+          },
+        },
+        replay: true,
+      },
+    });
   }
 
   async submitAttempt(
@@ -119,14 +144,19 @@ export class DailyService {
     if (!userId && !guestSessionId) {
       throw new BadRequestException('User or guest session required');
     }
+    if (typeof answer !== 'string' || answer.trim().length === 0 || answer.length > 200) {
+      throw new BadRequestException('Invalid answer');
+    }
 
     const challenge = await this.prisma.dailyChallenge.findUnique({
       where: { id: dailyChallengeId },
-      include: { word: true },
+      include: { word: { select: { canonical: true, synonyms: true } } },
     });
-
     if (!challenge) {
-      throw new BadRequestException('Challenge not found');
+      throw new NotFoundException('Challenge not found');
+    }
+    if (challenge.date.getTime() !== getVietnamToday().getTime()) {
+      throw new BadRequestException('Daily challenge expired');
     }
 
     // Serialize the check-then-create under an advisory lock so concurrent
@@ -137,27 +167,33 @@ export class DailyService {
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey})`;
 
-      const challenge = await tx.dailyChallenge.findUnique({
+      const current = await tx.dailyChallenge.findUnique({
         where: { id: dailyChallengeId },
-        include: { word: true },
+        include: { word: { select: { canonical: true, synonyms: true } } },
       });
-      if (!challenge) throw new BadRequestException('Challenge not found');
+      if (!current) throw new NotFoundException('Challenge not found');
+
+      const identityWhere = userId ? { userId } : { guestSessionId: guestSessionId! };
+      const attempts = await tx.dailyChallengeAttempt.findMany({
+        where: { dailyChallengeId, ...identityWhere },
+        orderBy: { createdAt: 'desc' },
+        select: { correct: true, createdAt: true },
+      });
+
+      if (attempts.some(a => a.correct)) throw new BadRequestException('Already solved today');
+
+      // DAILY-04: enforce a per-identity cap and a short cooldown between
+      // guesses so an endless submit loop cannot flood the attempts table.
+      if (attempts.length >= MAX_DAILY_ATTEMPTS) {
+        throw new BadRequestException('Đã hết lượt đoán hôm nay. Vui lòng quay lại ngày mai.');
+      }
+      if (attempts.length > 0 && Date.now() - attempts[0].createdAt.getTime() < DAILY_ATTEMPT_COOLDOWN_MS) {
+        throw new BadRequestException('Vui lòng đợi một giây trước khi đoán lại.');
+      }
 
       const normalized = normalizeGuess(answer);
-      const synonyms = (challenge.word.synonyms as string[]) ?? [];
-      const correct = validateGuess(answer, challenge.word.canonical, synonyms);
-
-      const whereCondition: any = {
-        dailyChallengeId,
-        correct: true,
-      };
-      if (userId) whereCondition.userId = userId;
-      else if (guestSessionId) whereCondition.guestSessionId = guestSessionId;
-
-      const existingAttempt = await tx.dailyChallengeAttempt.findFirst({
-        where: whereCondition,
-      });
-      if (existingAttempt) throw new BadRequestException('Already solved today');
+      const synonyms = (current.word.synonyms as string[]) ?? [];
+      const correct = validateGuess(answer, current.word.canonical, synonyms);
 
       const attempt = await tx.dailyChallengeAttempt.create({
         data: {
@@ -174,17 +210,19 @@ export class DailyService {
         await this.updateStreak(userId, tx);
       }
 
-      return { attempt, correct };
+      return {
+        attempt,
+        correct,
+        remainingAttempts: MAX_DAILY_ATTEMPTS - attempts.length - 1,
+        answerCanonical: correct ? current.word.canonical : undefined,
+      };
     });
   }
 
   private async updateStreak(userId: string, tx?: any) {
     const client = tx ?? this.prisma;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
+    const today = getVietnamToday();
+    const yesterday = previousVietnamDay(today);
 
     // Use upsert so concurrent calls cannot race between findUnique and create.
     const existing = await client.streak.findUnique({ where: { userId } });
@@ -200,8 +238,7 @@ export class DailyService {
       });
     }
 
-    const lastPlayed = new Date(existing.lastPlayedAt);
-    lastPlayed.setHours(0, 0, 0, 0);
+    const lastPlayed = getVietnamToday(new Date(existing.lastPlayedAt));
 
     let newStreak = existing.currentStreak;
     if (lastPlayed.getTime() === today.getTime()) {
