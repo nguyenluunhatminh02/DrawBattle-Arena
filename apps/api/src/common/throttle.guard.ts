@@ -24,6 +24,12 @@ const MAX_BUCKETS = 10_000;
 const REDIS_KEY_PREFIX = 'drawbattle:throttle:';
 /** Silent fallback when Redis is unavailable must not swallow all abuse. */
 const REDIS_FAILURE_LOG_INTERVAL_MS = 60_000;
+/**
+ * After a Redis command fails, keep using local buckets only for this long.
+ * A permanent latch would leave every later request on the weaker per-process
+ * fallback even after Redis recovers.
+ */
+const REDIS_RETRY_MS = 30_000;
 
 /**
  * Atomic fixed-window counter. Returns [count, ttlMs]; INCR and EXPIRE are
@@ -61,15 +67,16 @@ type Bucket = { count: number; resetAt: number };
 /**
  * Global HTTP throttle. Uses a shared Redis fixed-window bucket when REDIS_URL
  * is configured and the client is connected; otherwise it falls back to the
- * original process-local buckets. Redis errors are logged at most once a
- * minute and never fail a request.
+ * original process-local buckets. After a Redis error it retries on a cooldown
+ * (or as soon as Redis reports ready again), and logs at most once a minute.
+ * Redis failures never fail a request.
  */
 @Injectable()
 export class ThrottleGuard implements CanActivate, OnModuleDestroy {
   private readonly logger = new Logger(ThrottleGuard.name);
   private readonly buckets = new Map<string, Bucket>();
   private readonly redis: RedisClientType | null;
-  private redisDisabled = false;
+  private redisRetryAfter = 0;
   private lastRedisFailureAt = 0;
 
   constructor(private readonly reflector: Reflector) {
@@ -101,7 +108,7 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     const mult = Number.isFinite(parsedMult) && parsedMult > 0 ? Math.floor(parsedMult) : 1;
     const limit = config.limit * mult;
 
-    const allowed = this.redis && !this.redisDisabled
+    const allowed = this.redis && Date.now() >= this.redisRetryAfter
       ? await this.checkRedis(key, config.windowMs, limit)
       : this.checkLocal(key, config.windowMs, limit);
     if (!allowed) {
@@ -122,6 +129,11 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     try {
       const client = createClient({ url }) as RedisClientType;
       client.on('error', err => this.onRedisError(err));
+      // A reconnection can complete before the cooldown expires; resume shared
+      // buckets immediately instead of waiting out the rest of the interval.
+      client.on('ready', () => {
+        this.redisRetryAfter = 0;
+      });
       // Connection failures are reported by the 'error' handler; catch here so
       // boot never fails just because rate limiting must use the fallback.
       void client.connect().catch(err => this.onRedisError(err));
@@ -150,12 +162,14 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
         keys: [`${REDIS_KEY_PREFIX}${key}`],
         arguments: [String(windowMs)],
       })) as [number, number];
+      this.redisRetryAfter = 0;
       return Number(result[0]) <= limit;
     } catch (err) {
       this.onRedisError(err);
-      // Stop trying for this process: repeated awaited failures on every
-      // request would add latency and log noise while Redis is down.
-      this.redisDisabled = true;
+      // Pause Redis briefly: repeated awaited failures on every request would
+      // add latency and log noise while Redis is down, but a permanent latch
+      // would never notice recovery. The cooldown is also cleared by 'ready'.
+      this.redisRetryAfter = Date.now() + REDIS_RETRY_MS;
       return this.checkLocal(key, windowMs, limit);
     }
   }

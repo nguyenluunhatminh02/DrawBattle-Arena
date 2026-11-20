@@ -113,9 +113,15 @@ describe('ThrottleGuard', () => {
   describe('with REDIS_URL configured', () => {
     const counts = new Map<string, number>();
     let evalMock: jest.Mock;
+    let onMock: jest.Mock;
+    let readyListeners: Array<() => void>;
 
     beforeEach(() => {
       counts.clear();
+      readyListeners = [];
+      onMock = jest.fn((event: string, listener: () => void) => {
+        if (event === 'ready') readyListeners.push(listener);
+      });
       evalMock = jest.fn(async (_script: string, opts: { keys: string[] }) => {
         const key = opts.keys[0];
         const count = (counts.get(key) ?? 0) + 1;
@@ -123,7 +129,7 @@ describe('ThrottleGuard', () => {
         return [count, 60_000];
       });
       (createClient as jest.Mock).mockReturnValue({
-        on: jest.fn(),
+        on: onMock,
         connect: jest.fn().mockResolvedValue(undefined),
         quit: jest.fn().mockResolvedValue(undefined),
         isReady: true,
@@ -149,16 +155,50 @@ describe('ThrottleGuard', () => {
       await guardB.onModuleDestroy();
     });
 
-    it('falls back to in-memory buckets when a Redis command fails', async () => {
+    it('falls back after a Redis failure but retries Redis after the cooldown', async () => {
+      jest.useFakeTimers();
+      try {
+        evalMock.mockRejectedValueOnce(new Error('redis down'));
+        mockReflector.get.mockReturnValue({ limit: 1, windowMs: 60_000, keyPrefix: 'fallback' });
+        const redisGuard = new ThrottleGuard(mockReflector);
+        const ctx = makeContext('10.9.9.9');
+
+        await expect(redisGuard.canActivate(ctx)).resolves.toBe(true);
+        await expect(redisGuard.canActivate(ctx)).rejects.toThrow();
+        expect(evalMock).toHaveBeenCalledTimes(1);
+        expect((redisGuard as any).redisRetryAfter).toBeGreaterThan(Date.now());
+
+        // Still cooling down: stay on local buckets, do not hammer Redis.
+        await expect(redisGuard.canActivate(ctx)).rejects.toThrow();
+        expect(evalMock).toHaveBeenCalledTimes(1);
+
+        // After the cooldown a later request retries Redis and shared counting recovers.
+        jest.setSystemTime(Date.now() + 30_000);
+        await expect(redisGuard.canActivate(ctx)).resolves.toBe(true);
+        expect(evalMock).toHaveBeenCalledTimes(2);
+        expect((redisGuard as any).redisRetryAfter).toBe(0);
+        await expect(redisGuard.canActivate(ctx)).rejects.toThrow();
+        expect(evalMock).toHaveBeenCalledTimes(3);
+        await redisGuard.onModuleDestroy();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('resumes Redis as soon as the client reports ready', async () => {
       evalMock.mockRejectedValueOnce(new Error('redis down'));
-      mockReflector.get.mockReturnValue({ limit: 1, windowMs: 60_000, keyPrefix: 'fallback' });
+      mockReflector.get.mockReturnValue({ limit: 1, windowMs: 60_000, keyPrefix: 'fallback-ready' });
       const redisGuard = new ThrottleGuard(mockReflector);
-      const ctx = makeContext('10.9.9.9');
+      const ctx = makeContext('10.9.9.10');
 
       await expect(redisGuard.canActivate(ctx)).resolves.toBe(true);
-      await expect(redisGuard.canActivate(ctx)).rejects.toThrow();
-      expect((redisGuard as any).redisDisabled).toBe(true);
       expect(evalMock).toHaveBeenCalledTimes(1);
+      expect(readyListeners.length).toBeGreaterThan(0);
+
+      readyListeners.forEach(listener => listener());
+      expect((redisGuard as any).redisRetryAfter).toBe(0);
+      await expect(redisGuard.canActivate(ctx)).resolves.toBe(true);
+      expect(evalMock).toHaveBeenCalledTimes(2);
       await redisGuard.onModuleDestroy();
     });
   });
