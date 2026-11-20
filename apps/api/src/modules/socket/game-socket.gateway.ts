@@ -14,7 +14,6 @@ import { AuthService } from '../auth/auth.service';
 import { RoomService } from '../room/room.service';
 import { GameStateService, RoomEvent } from '../game/game-state.service';
 import { RedisAdapterService } from './redis-adapter.service';
-import { PrismaService } from '../../prisma/prisma.service';
 import { validateStrokeCoordinates } from '@drawbattle/shared';
 import type { StrokeChunk } from '@drawbattle/shared';
 import { containsProfanity } from '../../common/profanity';
@@ -54,7 +53,6 @@ export class GameSocketGateway
     private readonly roomService: RoomService,
     private readonly game: GameStateService,
     private readonly redisAdapter: RedisAdapterService,
-    private readonly prisma: PrismaService,
   ) {}
 
   afterInit(server: Server) {
@@ -194,13 +192,23 @@ export class GameSocketGateway
           await this.roomService.resetRoomStatus(joined.roomId);
           socket.emit('match:cancelled', { reason: 'SERVER_RESTART' });
         }
+        const activePlayers = dbRoom.players;
+        const hostId =
+          dbRoom.hostPlayerId && activePlayers.some(p => p.id === dbRoom.hostPlayerId)
+            ? dbRoom.hostPlayerId
+            : joined.playerId;
+        if (hostId !== dbRoom.hostPlayerId) {
+          await this.roomService.updateHost(joined.roomId, hostId);
+        }
+        const hostNickname =
+          activePlayers.find(p => p.id === hostId)?.nicknameSnapshot ?? nickname;
         this.game.initRoom(
           joined.roomId,
-          dbRoom.hostPlayerId!,
-          dbRoom.players[0].nicknameSnapshot,
+          hostId,
+          hostNickname,
           dbRoom.settings as never,
         );
-        for (const p of dbRoom.players) {
+        for (const p of activePlayers) {
           this.game.addPlayer(joined.roomId, p.id, p.nicknameSnapshot);
         }
       }
@@ -252,11 +260,25 @@ export class GameSocketGateway
   }
 
   @SubscribeMessage('room:leave')
-  onRoomLeave(@ConnectedSocket() socket: AuthedSocket) {
+  async onRoomLeave(@ConnectedSocket() socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
     if (!roomId || !playerId) return;
+
+    const timer = this.disconnectTimers.get(playerId);
+    if (timer) {
+      clearTimeout(timer);
+      this.disconnectTimers.delete(playerId);
+    }
+
+    try {
+      await this.roomService.leaveRoom(roomId, playerId);
+    } catch (err) {
+      this.logger.error('Failed to mark player left', err instanceof Error ? err.message : String(err));
+    }
+
     this.game.removePlayer(roomId, playerId);
+
     const roomMap = this.roomSockets.get(roomId);
     if (roomMap) {
       roomMap.delete(playerId);
@@ -266,6 +288,8 @@ export class GameSocketGateway
     }
     socket.leave(roomId);
     this.server.to(roomId).emit('room:playerLeft', playerId);
+    this.broadcastRoomUpdate(roomId);
+    socket.emit('room:left');
     socket.data.roomId = undefined;
     socket.data.playerId = undefined;
   }
@@ -289,6 +313,11 @@ export class GameSocketGateway
       socket.emit('error', 'NOT_HOST', 'Only host can start');
       return;
     }
+    const check = this.game.canStartMatch(roomId, playerId);
+    if (!check.ok) {
+      socket.emit('error', check.reason ?? 'START_FAILED', check.message ?? 'Cannot start match');
+      return;
+    }
     const ok = await this.game.startMatch(roomId);
     if (!ok) {
       socket.emit('error', 'START_FAILED', 'Cannot start match');
@@ -302,6 +331,11 @@ export class GameSocketGateway
     if (!roomId || !playerId) return;
     if (!this.game.isHost(roomId, playerId)) {
       socket.emit('error', 'NOT_HOST', 'Only host can rematch');
+      return;
+    }
+    const check = this.game.canStartMatch(roomId, playerId);
+    if (!check.ok) {
+      socket.emit('error', check.reason ?? 'REMATCH_FAILED', check.message ?? 'Cannot rematch');
       return;
     }
     const ok = await this.game.startMatch(roomId);
@@ -396,7 +430,7 @@ export class GameSocketGateway
   }
 
   @SubscribeMessage('guess:submit')
-  async onGuessSubmit(
+  onGuessSubmit(
     @ConnectedSocket() socket: AuthedSocket,
     @MessageBody() guess: string,
   ) {
@@ -414,27 +448,6 @@ export class GameSocketGateway
     if (!this.checkSocketRateLimit(socket, 'guess', 5, 2000)) return;
     const result = this.game.submitGuess(roomId, playerId, guess);
     if (!result.accepted) return;
-    
- // Persist guess to DB
- const prisma = this.prisma;
- const logger = this.logger;
- try {
- const turn = this.game.getTurnSnapshot(roomId);
- if (turn) {
- await prisma.guess.create({
- data: {
- turnId: turn.id,
- playerId,
- guessText: guess,
- normalizedText: guess.toLowerCase().trim(),
- correct: result.correct,
- },
- });
- }
- } catch (err) {
- logger.error('Failed to persist guess', err instanceof Error ? err.message : String(err));
- }
-    
     if (!result.correct) {
       socket.emit('guess:wrong');
     }

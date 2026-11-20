@@ -107,7 +107,7 @@ export class RoomService {
     const room = await this.prisma.room.findUnique({
       where: { code },
       include: {
-        players: { include: { user: true, guest: true } },
+        players: { where: { leftAt: null }, include: { user: true, guest: true } },
       },
     });
     if (!room) throw new NotFoundException('Room not found');
@@ -141,12 +141,13 @@ export class RoomService {
         throw new BadRequestException('Room expired');
       }
 
+      const activePlayers = room.players.filter(p => !p.leftAt);
       const existing = room.players.find(
         p =>
           (userId && p.userId === userId) ||
           (guestSessionId && p.guestSessionId === guestSessionId),
       );
-      if (existing) {
+      if (existing && !existing.leftAt) {
         return {
           roomId: room.id,
           roomCode: room.code,
@@ -161,8 +162,20 @@ export class RoomService {
       if (settings.passwordHash && !verifyRoomPassword(password, settings.passwordHash)) {
         throw new BadRequestException('Invalid password');
       }
-      if (room.players.length >= settings.maxPlayers) {
+      if (activePlayers.length >= settings.maxPlayers) {
         throw new BadRequestException('Room is full');
+      }
+
+      if (existing && existing.leftAt) {
+        const reactivated = await tx.roomPlayer.update({
+          where: { id: existing.id },
+          data: { leftAt: null, nicknameSnapshot: nickname },
+        });
+        return {
+          roomId: room.id,
+          roomCode: room.code,
+          playerId: reactivated.id,
+        };
       }
 
       if (!nickname || nickname.trim().length === 0) {
@@ -194,7 +207,7 @@ export class RoomService {
     const room = await this.prisma.room.findUnique({
       where: { id },
       include: {
-        players: { orderBy: { joinedAt: 'asc' } },
+        players: { where: { leftAt: null }, orderBy: { joinedAt: 'asc' } },
       },
     });
     if (!room) throw new NotFoundException('Room not found');
@@ -206,6 +219,23 @@ export class RoomService {
       where: { id },
       data: { status: 'WAITING' },
     });
+  }
+
+  async leaveRoom(roomId: string, playerId: string) {
+    await this.prisma.roomPlayer.update({
+      where: { id: playerId },
+      data: { leftAt: new Date() },
+    });
+    const activeCount = await this.prisma.roomPlayer.count({
+      where: { roomId, leftAt: null },
+    });
+    if (activeCount === 0) {
+      await this.prisma.room.update({
+        where: { id: roomId },
+        data: { status: 'WAITING', hostPlayerId: null },
+      });
+    }
+    return { activeCount };
   }
 
   async updateHost(roomId: string, hostPlayerId: string) {

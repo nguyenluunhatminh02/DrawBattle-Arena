@@ -237,14 +237,14 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
           <div className="flex gap-0.5 md:gap-1 shrink-0">
             <button
               onClick={() => setTool('pen')}
-              className={`w-7 h-7 md:w-8 md:h-8 rounded flex items-center justify-center text-xs ${tool === 'pen' ? 'bg-primary/20 font-bold' : 'bg-secondary'}`}
+              className={`w-9 h-9 md:w-8 md:h-8 rounded flex items-center justify-center text-xs ${tool === 'pen' ? 'bg-primary/20 font-bold' : 'bg-secondary'}`}
               title="Bút"
             >
               ✏️
             </button>
             <button
               onClick={() => setTool('eraser')}
-              className={`w-7 h-7 md:w-8 md:h-8 rounded flex items-center justify-center text-xs ${tool === 'eraser' ? 'bg-primary/20 font-bold' : 'bg-secondary'}`}
+              className={`w-9 h-9 md:w-8 md:h-8 rounded flex items-center justify-center text-xs ${tool === 'eraser' ? 'bg-primary/20 font-bold' : 'bg-secondary'}`}
               title="Tẩy"
             >
               🧹
@@ -256,8 +256,9 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
                 <button
                   key={c}
                   onClick={() => setColor(c)}
-                  className={`w-6 h-6 md:w-7 md:h-7 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-transparent'}`}
+                  className={`w-8 h-8 md:w-7 md:h-7 rounded-full border-2 transition-transform ${color === c ? 'border-primary scale-110' : 'border-transparent'}`}
                   style={{ backgroundColor: c }}
+                  aria-label={`Màu ${c}`}
                 />
               ))}
             </div>
@@ -267,7 +268,8 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
               <button
                 key={s}
                 onClick={() => setBrushSize(s)}
-                className={`w-7 h-7 md:w-8 md:h-8 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary/20' : 'bg-secondary'}`}
+                className={`w-9 h-9 md:w-8 md:h-8 rounded flex items-center justify-center ${brushSize === s ? 'bg-primary/20' : 'bg-secondary'}`}
+                aria-label={`Cỡ nét ${s}`}
               >
                 <div className="rounded-full bg-current" style={{ width: s, height: s }} />
               </button>

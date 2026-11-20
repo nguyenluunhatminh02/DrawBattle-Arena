@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { useGameStore } from '@/lib/store';
 import { connectSocket, disconnectSocket, getSocket } from '@/lib/socket';
+import { api } from '@/lib/api';
 import { DrawingCanvas } from '@/components/canvas/DrawingCanvas';
 import { QRCodeDisplay } from '@/components/ui/qr-code';
 import { getModeConfig } from '@drawbattle/shared';
@@ -45,16 +46,16 @@ export default function RoomPage() {
   const [passwordInput, setPasswordInput] = useState('');
   const passwordRef = useRef('');
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [joinNickname, setJoinNickname] = useState('');
+  const [joining, setJoining] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
 
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => setHydrated(true), []);
 
   useEffect(() => {
     if (!hydrated) return;
-    if (!player || !player.nickname || !player.token) {
-      router.push('/');
-      return;
-    }
+    if (!player || !player.nickname || !player.token) return;
 
     const socket = connectSocket(player.token);
     const store = useGameStore.getState;
@@ -251,6 +252,10 @@ export default function RoomPage() {
       store().addChat(msg);
     });
 
+    socket.on('room:left', () => {
+      router.push('/');
+    });
+
     socket.on('error', (errCode: string, message: string) => {
       if (errCode === 'INVALID_PASSWORD') {
         joined = false;
@@ -296,11 +301,37 @@ export default function RoomPage() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chat]);
 
-  if (!hydrated || !player) return null;
+  if (!hydrated) return null;
+
+  if (!player || !player.nickname || !player.token) {
+    return (
+      <div className="h-[100dvh] flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-blue-50">
+        <Card className="w-full max-w-sm">
+          <CardContent className="pt-6 space-y-3">
+            <h2 className="text-lg font-semibold text-center">Vào phòng <span className="font-mono text-primary">{code}</span></h2>
+            <p className="text-sm text-muted-foreground text-center">Nhập tên để tham gia cùng bạn bè</p>
+            <Input
+              value={joinNickname}
+              onChange={e => setJoinNickname(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && joinWithNickname()}
+              placeholder="Nhập tên của bạn..."
+              maxLength={20}
+              autoFocus
+              className="h-11 text-base"
+            />
+            {joinError && <p className="text-sm text-destructive">{joinError}</p>}
+            <Button className="w-full h-11" onClick={joinWithNickname} disabled={!joinNickname.trim() || joining}>
+              {joining ? 'Đang vào...' : 'Vào phòng'}
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (needPassword) {
     return (
-      <div className="h-screen flex items-center justify-center p-4 bg-background">
+      <div className="h-[100dvh] flex items-center justify-center p-4 bg-background">
         <Card className="w-full max-w-sm">
           <CardContent className="pt-6 space-y-3">
             <h2 className="text-lg font-semibold text-center">Phòng có mật khẩu</h2>
@@ -322,6 +353,8 @@ export default function RoomPage() {
   }
 
   const amIHost = !!myPlayerId && room?.hostId === myPlayerId;
+  const others = room?.players.filter(p => p.id !== myPlayerId) ?? [];
+  const notReady = others.filter(p => !p.isReady);
   const amIDrawer = !!myPlayerId && !!drawerId && myPlayerId === drawerId;
   const drawerName = room?.players.find(p => p.id === drawerId)?.nickname ?? '?';
   const isInDrawingPhase = currentPhase === 'DRAWING';
@@ -349,6 +382,20 @@ export default function RoomPage() {
         ? 'Đoán từ...'
         : 'Chat...';
   const chatDisabled = (amIDrawer || teammateDrawing) && isInDrawingPhase;
+
+  async function joinWithNickname() {
+    const name = joinNickname.trim();
+    if (!name || joining) return;
+    setJoining(true);
+    setJoinError(null);
+    try {
+      const session = await api.createGuest(name);
+      useGameStore.getState().setPlayer({ token: session.token, playerId: session.playerId, nickname: name });
+    } catch (err) {
+      setJoinError(err instanceof Error ? err.message : 'Không tạo được phiên, thử lại');
+      setJoining(false);
+    }
+  }
 
   function submitPassword() {
     passwordRef.current = passwordInput.trim();
@@ -415,30 +462,39 @@ export default function RoomPage() {
   const sortedScores = [...scores].sort((a, b) => b.points - a.points);
 
   return (
-    <div className="h-screen flex flex-col bg-background">
-      <header className="flex items-center justify-between px-4 py-2 border-b bg-card">
-        <div className="flex items-center gap-3">
-          <h1 className="font-bold text-primary">DrawBattle</h1>
-          <Badge variant="outline">{code}</Badge>
+    <div className="h-[100dvh] flex flex-col bg-background">
+      <header className="flex items-center justify-between gap-1.5 px-2 md:px-4 py-1.5 md:py-2 border-b bg-card">
+        <div className="flex items-center gap-1.5 md:gap-3 min-w-0">
+          <h1 className="font-bold text-primary text-sm md:text-base shrink-0">DrawBattle</h1>
+          <Badge variant="outline" className="shrink-0 font-mono">{code}</Badge>
           {room?.settings.mode && room.settings.mode !== 'CLASSIC' && (
-            <Badge variant="secondary">
+            <Badge variant="secondary" className="shrink-0 hidden xs:inline-flex sm:inline-flex">
               {room.settings.mode === 'DUEL' ? '1v1' : room.settings.mode === 'SPEED' ? 'Speed' : 'Đội'}
             </Badge>
           )}
-          <span className={`text-xs ${connected ? 'text-green-500' : 'text-red-500'}`}>
+          <span className={`hidden sm:inline text-xs shrink-0 ${connected ? 'text-green-500' : 'text-red-500'}`}>
             {connected ? '● online' : '○ offline'}
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 md:gap-2 shrink-0">
           {currentPhase && currentPhase !== 'WAITING' && currentPhase !== 'MATCH_RESULT' && (
-            <Badge variant="secondary">{timeLeft}s</Badge>
+            <Badge variant="secondary" className="shrink-0">{timeLeft}s</Badge>
           )}
           {drawerOrder && currentPhase && currentPhase !== 'WAITING' && (
-            <div className="text-xs text-muted-foreground">
+            <div className="hidden md:block text-xs text-muted-foreground">
               Thứ tự: {drawerOrder.map((d, i) => <span key={d.id} className={d.id === drawerId ? 'font-bold text-primary' : ''}>{i > 0 && ' → '}{d.nickname}</span>)}
             </div>
           )}
-          <Button size="sm" variant="outline" onClick={copyLink}>Copy Link</Button>
+          <Button size="sm" variant="outline" onClick={copyLink} className="shrink-0 h-8 px-2 md:px-3">
+            <span className="hidden md:inline">Copy Link</span><span className="md:hidden">Link</span>
+          </Button>
+          <Button size="sm" variant="ghost" className="text-destructive shrink-0 h-8 px-2 md:px-3" onClick={() => {
+            if (confirm('Bạn có chắc muốn rời phòng?')) {
+              getSocket()?.emit('room:leave');
+            }
+          }}>
+            <span className="hidden md:inline">Rời phòng</span><span className="md:hidden">Thoát</span>
+          </Button>
         </div>
       </header>
 
@@ -447,7 +503,7 @@ export default function RoomPage() {
       )}
 
       {teams && currentPhase && currentPhase !== 'WAITING' && currentPhase !== 'MATCH_RESULT' && (
-        <div className="flex items-center justify-center gap-6 px-4 py-1.5 border-b bg-card text-xs">
+        <div className="flex items-center justify-center gap-3 md:gap-6 px-2 md:px-4 py-1.5 border-b bg-card text-xs overflow-x-auto">
           <div className="flex items-center gap-1.5">
             <Badge variant="secondary" className={myTeam === 'A' ? 'bg-blue-600 text-white' : ''}>Đội A</Badge>
             <span className="text-muted-foreground">
@@ -466,10 +522,10 @@ export default function RoomPage() {
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         <div className="flex-1 flex flex-col min-h-0 md:min-h-full overflow-hidden">
           {room?.status === 'WAITING' && !currentPhase && (
-            <div className="flex-1 flex items-center justify-center p-8 overflow-y-auto">
+            <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
               <Card className="w-full max-w-md">
-                <CardContent className="pt-6 space-y-4">
-                  <h2 className="text-xl font-semibold text-center">Phòng chờ</h2>
+                <CardContent className="pt-4 md:pt-6 space-y-3 md:space-y-4">
+                  <h2 className="text-lg md:text-xl font-semibold text-center">Phòng chờ</h2>
 
                   <div className="flex flex-col items-center gap-2 p-3 bg-secondary/30 rounded">
                     <p className="text-sm text-muted-foreground">Quét để mời bạn bè</p>
@@ -480,10 +536,11 @@ export default function RoomPage() {
                   <div className="space-y-2">
                     {room.players.map(p => (
                       <div key={p.id} className="flex items-center justify-between p-2 rounded bg-secondary/50">
-                        <span>{p.nickname}{p.id === myPlayerId ? ' (bạn)' : ''}</span>
-                        <div className="flex gap-1 items-center">
+                        <span className="truncate min-w-0">{p.nickname}{p.id === myPlayerId ? ' (bạn)' : ''}</span>
+                        <div className="flex gap-1 items-center flex-wrap justify-end shrink-0">
                           {!p.isOnline && <Badge variant="outline">offline</Badge>}
                           {p.isReady && <Badge variant="secondary">ready</Badge>}
+                          {p.isOnline && !p.isReady && !p.isHost && <Badge variant="outline" className="text-muted-foreground font-normal">chưa sẵn sàng</Badge>}
                           {p.isMuted && <Badge variant="secondary">muted</Badge>}
                           {p.isHost && <Badge>Host</Badge>}
                           {amIHost && p.id !== myPlayerId && (
@@ -542,14 +599,21 @@ export default function RoomPage() {
                     </div>
                   )}
                   {amIHost && (
-                    <Button
-                      className="w-full"
-                      size="lg"
-                      onClick={handleStart}
-                      disabled={room.players.length < getModeConfig(room.settings.mode ?? 'CLASSIC').minPlayers}
-                    >
-                      Bắt đầu ({room.players.length}/{room.settings.maxPlayers})
-                    </Button>
+                    <>
+                      <Button
+                        className="w-full h-12"
+                        size="lg"
+                        onClick={handleStart}
+                        disabled={room.players.length < getModeConfig(room.settings.mode ?? 'CLASSIC').minPlayers || notReady.length > 0}
+                      >
+                        Bắt đầu ({room.players.length}/{room.settings.maxPlayers})
+                      </Button>
+                      {notReady.length > 0 && room.players.length >= getModeConfig(room.settings.mode ?? 'CLASSIC').minPlayers && (
+                        <p className="text-center text-xs text-muted-foreground">
+                          Chờ sẵn sàng: {notReady.map(p => p.nickname).join(', ')}
+                        </p>
+                      )}
+                    </>
                   )}
                   {!amIHost && (
                     <>
@@ -572,7 +636,7 @@ export default function RoomPage() {
           )}
 
           {showWordPicker && amIDrawer && currentPhase === 'WORD_PICK' && (
-            <div className="flex-1 flex items-center justify-center p-8">
+            <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
               <Card className="w-full max-w-lg">
                 <CardContent className="pt-6 space-y-4">
                   <h2 className="text-xl font-semibold text-center">Chọn từ để vẽ</h2>
@@ -597,7 +661,7 @@ export default function RoomPage() {
           )}
 
           {currentPhase === 'DRAWING' && (
-            <div className="flex flex-col p-2 md:flex-1 md:min-h-0">
+            <div className="flex flex-col p-2 flex-1 min-h-0">
               <div className="flex items-center justify-between mb-2 px-2 gap-2">
                 <div className="flex items-center gap-2 flex-wrap min-w-0">
                   <Badge variant="outline" className="shrink-0">{amIDrawer ? 'Bạn đang vẽ' : `${drawerName} đang vẽ`}</Badge>
@@ -606,7 +670,7 @@ export default function RoomPage() {
                 </div>
                 <Badge variant="secondary" className="shrink-0">{timeLeft}s</Badge>
               </div>
-              <div className="aspect-[16/10] md:flex-1 md:aspect-auto md:min-h-0">
+              <div className="flex-1 min-h-0">
                 <DrawingCanvas
                   strokes={strokes}
                   isDrawer={amIDrawer}
@@ -622,7 +686,7 @@ export default function RoomPage() {
           )}
 
           {currentPhase === 'REVEAL' && (
-            <div className="flex-1 flex items-center justify-center p-8">
+            <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
               <Card className="w-full max-w-md">
                 <CardContent className="pt-6 space-y-4 text-center">
                   <h2 className="text-2xl font-bold text-primary">{revealWord}</h2>
@@ -650,7 +714,7 @@ export default function RoomPage() {
           )}
 
           {currentPhase === 'MATCH_RESULT' && matchResults && (
-            <div className="flex-1 flex items-center justify-center p-8 overflow-y-auto">
+            <div className="flex-1 flex items-center justify-center p-3 md:p-8 overflow-y-auto">
               <Card className="w-full max-w-md">
                 <CardContent className="pt-6 space-y-4">
                   <h2 className="text-2xl font-bold text-center">Kết quả</h2>
@@ -689,7 +753,7 @@ export default function RoomPage() {
                       </div>
                     ))}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-col sm:flex-row gap-2">
                     {amIHost && (
                       <Button className="flex-1" size="lg" onClick={handleRematch}>Chơi lại</Button>
                     )}
@@ -708,16 +772,16 @@ export default function RoomPage() {
           )}
         </div>
 
-        <div className="w-full md:w-80 flex-1 md:flex-initial border-t md:border-t-0 md:border-l flex flex-col bg-card flex-shrink-0 min-h-0">
-          <div className="p-3 border-b">
+        <div className={`${room?.status === 'WAITING' && !currentPhase ? 'hidden md:flex' : 'flex'} w-full md:w-80 h-[38dvh] md:h-auto md:flex-initial border-t md:border-t-0 md:border-l flex-col bg-card flex-shrink-0 min-h-0`}>
+          <div className="p-3 border-b hidden md:block">
             <h3 className="font-semibold text-sm">Bảng điểm</h3>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-1">
+          <div className="md:flex-1 overflow-x-auto md:overflow-y-auto p-2 md:p-3 flex md:block gap-1.5 md:space-y-1 border-b md:border-b-0 shrink-0">
             {sortedScores.map((s, i) => {
               const p = room?.players.find(x => x.id === s.playerId);
               return (
-                <div key={s.playerId} className="flex items-center justify-between text-sm p-1">
-                  <span className="truncate">
+                <div key={s.playerId} className="flex items-center justify-between text-sm p-1 shrink-0 rounded bg-secondary/40 md:bg-transparent px-2 md:px-1 gap-1.5">
+                  <span className="truncate max-w-[7rem] md:max-w-none">
                     <span className="text-muted-foreground mr-1">{i + 1}.</span>
                     {p?.nickname || '?'}
                   </span>
@@ -726,7 +790,7 @@ export default function RoomPage() {
               );
             })}
           </div>
-          <div className="border-t flex flex-col h-40 md:h-64">
+          <div className="border-t md:border-t flex flex-col flex-1 min-h-0 md:flex-initial md:h-64">
             <div className="flex-1 overflow-y-auto p-3 space-y-1 text-sm">
               {chat.map(msg => (
                 <div key={msg.id}>
@@ -747,9 +811,9 @@ export default function RoomPage() {
                 onKeyDown={e => e.key === 'Enter' && handleSendChat()}
                 placeholder={chatPlaceholder}
                 disabled={chatDisabled}
-                className="text-sm h-8"
+                className="text-base md:text-sm h-10 md:h-8"
               />
-              <Button size="sm" onClick={handleSendChat} disabled={!chatInput.trim() || chatDisabled} className="h-8">
+              <Button size="sm" onClick={handleSendChat} disabled={!chatInput.trim() || chatDisabled} className="h-10 md:h-8 px-3 md:px-3">
                 Gửi
               </Button>
             </div>

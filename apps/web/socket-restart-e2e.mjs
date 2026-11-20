@@ -45,6 +45,10 @@ async function phase1() {
   guest.emit('room:join', { roomCode: room.roomCode });
   await Promise.all([once(guest, 'room:snapshot'), once(host, 'room:playerJoined')]);
 
+  const readyP = once(host, 'room:snapshot');
+  guest.emit('room:ready', true);
+  await readyP;
+
   const drawerP = new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('no drawer')), 20000);
     const hh = d => { clearTimeout(t); guest.off('turn:youAreDrawer', gh); resolve({ drawer: host, data: d }); };
@@ -79,6 +83,10 @@ async function phase2() {
   const guest = connect(guestToken);
   guest.emit('room:join', { roomCode });
   await Promise.all([once(guest, 'room:snapshot'), once(host, 'room:playerJoined')]);
+
+  const readyP2 = once(host, 'room:snapshot');
+  guest.emit('room:ready', true);
+  await readyP2;
 
   const drawerP = new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('no drawer after restart')), 20000);

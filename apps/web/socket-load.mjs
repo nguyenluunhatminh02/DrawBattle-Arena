@@ -62,7 +62,12 @@ async function runRoom(idx) {
     sockets[i].emit('room:join', { roomCode: room.roomCode });
     await once(sockets[i], 'room:snapshot');
     joinLat.push(Date.now() - t0);
-    if (i > 0) await once(sockets[0], 'room:playerJoined');
+    if (i > 0) {
+      await once(sockets[0], 'room:playerJoined');
+      const rp = once(sockets[0], 'room:snapshot');
+      sockets[i].emit('room:ready', true);
+      await rp;
+    }
   }
 
   const drawerP = new Promise((resolve, reject) => {

@@ -23,6 +23,7 @@ export interface ServerToClientEvents {
   'room:snapshot': (snapshot: RoomSnapshot) => void;
   'room:playerJoined': (player: PlayerInfo) => void;
   'room:playerLeft': (playerId: string) => void;
+  'room:left': () => void;
   'room:hostChanged': (newHostId: string) => void;
   'room:playerKicked': (data: { playerId: string }) => void;
   'room:playerMuted': (data: { playerId: string; muted: boolean }) => void;

@@ -90,8 +90,18 @@ test.describe('Live Room Full Flow', () => {
     const hostText = await host.evaluate(() => document.body.innerText);
     expect(hostText).toContain('Guest');
 
+    const readyBtn = guest.locator('button', { hasText: 'Sẵn sàng' });
+    await readyBtn.waitFor({ state: 'visible', timeout: 10000 });
+    await readyBtn.click();
+    await host.waitForFunction(
+      () => document.body.innerText.includes('ready'),
+      null,
+      { timeout: 10000 },
+    );
+
     const startBtn = host.locator('button', { hasText: 'Bắt đầu' });
     await startBtn.waitFor({ state: 'visible', timeout: 10000 });
+    await expect(startBtn).toBeEnabled({ timeout: 10000 });
     await startBtn.click();
 
     const drawerInfo = await waitForDrawer([host, guest]);

@@ -71,6 +71,7 @@ model RoomPlayer {
   nicknameSnapshot String     @map("nickname_snapshot")
   role             PlayerRole @default(PLAYER)
   joinedAt         DateTime   @default(now()) @map("joined_at")
+  leftAt           DateTime?  @map("left_at")
 
   room    Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
   user    User?         @relation(fields: [userId], references: [id])

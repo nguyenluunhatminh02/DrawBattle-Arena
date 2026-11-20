@@ -50,6 +50,14 @@ interface PlayerState {
   guessesThisTurn: number;
 }
 
+interface GuessRecord {
+  playerId: string;
+  guessText: string;
+  normalizedText: string;
+  correct: boolean;
+  receivedAt: number;
+}
+
 interface CompletedTurn {
   id: string;
   drawerId: string;
@@ -58,6 +66,7 @@ interface CompletedTurn {
   startedAt: number;
   endsAt: number;
   correctCount: number;
+  guesses: GuessRecord[];
 }
 
 interface MatchState {
@@ -85,6 +94,7 @@ interface TurnState {
   endsAt: number;
   timeLimit: number;
   strokes: StrokeChunk[];
+  guesses: GuessRecord[];
   correctGuessers: Set<string>;
   firstCorrectId: string | null;
   wordOptions: Array<{ id: string; canonical: string; difficulty: string; category: string }>;
@@ -199,19 +209,60 @@ export class GameStateService {
   removePlayer(roomId: string, playerId: string): string | null {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    const turn = room.match?.turn ?? null;
+    const wasActiveDrawer =
+      !!turn &&
+      turn.drawerId === playerId &&
+      !turn.ended &&
+      (turn.phase === 'WORD_PICK' || turn.phase === 'DRAWING');
+
     room.players.delete(playerId);
+    if (room.teams) {
+      room.teams.teamA = room.teams.teamA.filter(id => id !== playerId);
+      room.teams.teamB = room.teams.teamB.filter(id => id !== playerId);
+    }
+
     if (room.players.size === 0) {
+      if (turn) {
+        turn.ended = true;
+        if (turn.timer) clearTimeout(turn.timer);
+        for (const t of turn.hintTimers) clearTimeout(t);
+      }
+      room.match = null;
       this.rooms.delete(roomId);
       this.unregisterSink(roomId);
+      void this.prisma.room
+        .update({ where: { id: roomId }, data: { status: 'WAITING', hostPlayerId: null } })
+        .catch(err => this.logger.error('Failed to reset empty room', err instanceof Error ? err.message : String(err)));
       return null;
     }
+
     if (room.hostId === playerId) {
       const newHost = room.players.values().next().value as PlayerState;
       newHost.isHost = true;
       room.hostId = newHost.id;
       this.emit(roomId, { type: 'room:hostChanged', payload: newHost.id });
-      return newHost.id;
+      void this.prisma.room
+        .update({ where: { id: roomId }, data: { hostPlayerId: newHost.id } })
+        .catch(err => this.logger.error('Failed to persist host transfer on leave', err instanceof Error ? err.message : String(err)));
     }
+
+    if (room.match) {
+      const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');
+      if (room.players.size < modeConfig.minPlayers) {
+        if (turn && !turn.ended) {
+          turn.ended = true;
+          if (turn.timer) clearTimeout(turn.timer);
+          for (const t of turn.hintTimers) clearTimeout(t);
+          turn.timer = null;
+          turn.hintTimers = [];
+        }
+        void this.endMatch(roomId);
+      } else if (wasActiveDrawer) {
+        this.abortCurrentTurn(roomId);
+      }
+    }
+
     return room.hostId;
   }
 
@@ -251,6 +302,23 @@ export class GameStateService {
     return Array.from(room.players.values()).map(p => this.toPlayerInfo(p));
   }
 
+  canStartMatch(roomId: string, playerId: string): { ok: boolean; reason?: string; message?: string } {
+    const room = this.rooms.get(roomId);
+    if (!room) return { ok: false, reason: 'ROOM_NOT_FOUND', message: 'Room not found' };
+    if (room.hostId !== playerId) return { ok: false, reason: 'NOT_HOST', message: 'Only host can start' };
+    if (room.match) return { ok: false, reason: 'MATCH_IN_PROGRESS', message: 'Match already in progress' };
+    const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');
+    const eligible = Array.from(room.players.values()).filter(p => !p.isKicked);
+    if (eligible.length < modeConfig.minPlayers) {
+      return { ok: false, reason: 'NOT_ENOUGH_PLAYERS', message: `Need at least ${modeConfig.minPlayers} players` };
+    }
+    const notReady = eligible.filter(p => p.id !== room.hostId && !p.isReady);
+    if (notReady.length > 0) {
+      return { ok: false, reason: 'PLAYERS_NOT_READY', message: `Chờ sẵn sàng: ${notReady.map(p => p.nickname).join(', ')}` };
+    }
+    return { ok: true };
+  }
+
   async startMatch(roomId: string): Promise<boolean> {
     return this.withLock(roomId, async () => {
       const room = this.rooms.get(roomId);
@@ -259,6 +327,7 @@ export class GameStateService {
       const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');
       const eligible = Array.from(room.players.values()).filter(p => !p.isKicked);
       if (eligible.length < modeConfig.minPlayers) return false;
+      if (eligible.some(p => p.id !== room.hostId && !p.isReady)) return false;
       if (room.match) return false;
 
       room.match = { id: '__starting__', rounds: 0, totalTurns: 0, currentRound: 0, drawerOrder: [], currentDrawerIndex: 0, turn: null, completedTurns: [], startedAt: Date.now() } as MatchState;
@@ -348,11 +417,26 @@ export class GameStateService {
     const room = this.rooms.get(roomId);
     if (!room || !room.match) return;
 
-    const drawerId = room.match.drawerOrder[room.match.currentDrawerIndex % room.match.drawerOrder.length];
+    let drawerId = room.match.drawerOrder[room.match.currentDrawerIndex % room.match.drawerOrder.length];
+    let skips = 0;
+    while (!room.players.has(drawerId) && skips < room.match.drawerOrder.length) {
+      room.match.currentDrawerIndex++;
+      skips++;
+      if (room.match.currentDrawerIndex >= room.match.totalTurns) {
+        void this.endMatch(roomId);
+        return;
+      }
+      drawerId = room.match.drawerOrder[room.match.currentDrawerIndex % room.match.drawerOrder.length];
+    }
+    if (!room.players.has(drawerId)) {
+      void this.endMatch(roomId);
+      return;
+    }
     const options = await this.wordService.pickRandomWords(3, {
       difficulty: room.settings.difficulty,
       category: room.settings.category,
     });
+    if (!this.rooms.get(roomId)?.match) return;
 
     const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');
     const wordPickDuration = modeConfig.wordPickDuration;
@@ -372,6 +456,7 @@ export class GameStateService {
       endsAt,
       timeLimit: wordPickDuration,
       strokes: [],
+      guesses: [],
       correctGuessers: new Set(),
       firstCorrectId: null,
       wordOptions: options,
@@ -616,9 +701,23 @@ export class GameStateService {
     player.lastGuessAt = now;
     player.guessesThisTurn++;
 
-    if (!turn.word) return { accepted: true, correct: false };
+    const record = (isCorrect: boolean) => {
+      turn.guesses.push({
+        playerId,
+        guessText: guess,
+        normalizedText: normalizeGuess(guess),
+        correct: isCorrect,
+        receivedAt: now,
+      });
+    };
+
+    if (!turn.word) {
+      record(false);
+      return { accepted: true, correct: false };
+    }
 
     const correct = validateGuess(guess, turn.word, turn.synonyms);
+    record(correct);
     if (correct) {
       player.hasCorrectGuess = true;
       turn.correctGuessers.add(playerId);
@@ -682,6 +781,20 @@ export class GameStateService {
     return true;
   }
 
+  private abortCurrentTurn(roomId: string) {
+    const room = this.rooms.get(roomId);
+    const turn = room?.match?.turn;
+    if (!room || !room.match || !turn || turn.ended) return;
+    turn.ended = true;
+    if (turn.timer) clearTimeout(turn.timer);
+    for (const t of turn.hintTimers) clearTimeout(t);
+    turn.timer = null;
+    turn.hintTimers = [];
+    room.match.turn = null;
+    this.emit(roomId, { type: 'match:phaseChanged', payload: { phase: 'NEXT_TURN' } });
+    setTimeout(() => this.transitionToNextTurn(roomId), 1000);
+  }
+
   private async endTurn(roomId: string) {
     const room = this.rooms.get(roomId);
     const turn = room?.match?.turn;
@@ -724,6 +837,7 @@ export class GameStateService {
         startedAt: turn.startedAt,
         endsAt: turn.endsAt,
         correctCount: turn.correctGuessers.size,
+        guesses: turn.guesses,
       });
     }
 
@@ -826,6 +940,15 @@ export class GameStateService {
                           strokes: t.strokes as unknown as Prisma.InputJsonValue,
                           durationMs: Math.max(0, t.endsAt - t.startedAt),
                         },
+                      },
+                      guesses: {
+                        create: t.guesses.map(g => ({
+                          playerId: g.playerId,
+                          guessText: g.guessText,
+                          normalizedText: g.normalizedText,
+                          correct: g.correct,
+                          receivedAt: new Date(g.receivedAt),
+                        })),
                       },
                     })),
                 },

@@ -20,3 +20,4 @@ apps/web/playwright-report/
 .playwright-mcp/
 test-results/
 playwright-report/
+.tmp-replay-route-check/

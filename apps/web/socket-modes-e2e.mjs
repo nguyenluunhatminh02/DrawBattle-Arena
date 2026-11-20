@@ -91,6 +91,9 @@ async function joinTwo(host, guest, code) {
     once(guest, 'room:snapshot'),
     once(host, 'room:playerJoined'),
   ]);
+  const readyP = once(host, 'room:snapshot');
+  guest.emit('room:ready', true);
+  await readyP;
   return { snapH, snapG };
 }
 
@@ -190,6 +193,12 @@ async function teamTest() {
       once(sockets[0], 'room:playerJoined'),
     ]);
     playerIds[i] = snap.yourPlayerId;
+  }
+
+  for (let i = 1; i < sockets.length; i++) {
+    const rp = once(sockets[0], 'room:snapshot');
+    sockets[i].emit('room:ready', true);
+    await rp;
   }
 
   let teamsPayload = null;

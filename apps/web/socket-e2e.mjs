@@ -82,6 +82,10 @@ async function main() {
   }
   if (snapG.yourPlayerId === snapH.yourPlayerId) throw new Error('duplicate player id');
 
+  const readyP = once(host, 'room:snapshot');
+  guest.emit('room:ready', true);
+  await readyP;
+
   host.emit('match:start');
   const w1 = await playTurn(host, guest);
   const w2 = await playTurn(host, guest);

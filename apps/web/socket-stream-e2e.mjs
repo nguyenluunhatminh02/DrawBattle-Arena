@@ -75,6 +75,10 @@ async function main() {
   guest.emit('room:join', { roomCode: room.roomCode });
   await Promise.all([once(guest, 'room:snapshot'), once(host, 'room:playerJoined')]);
 
+  const readyP = once(host, 'room:snapshot');
+  guest.emit('room:ready', true);
+  await readyP;
+
   const received = [];
   guest.on('draw:chunk', c => received.push(c));
 
