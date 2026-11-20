@@ -1,6 +1,6 @@
 import { test, expect, BrowserContext, Page } from '@playwright/test';
 
-const WEB = 'http://localhost:3002';
+const WEB = process.env.E2E_WEB_URL ?? 'http://localhost:3002';
 
 async function setupPlayer(context: BrowserContext, nickname: string): Promise<Page> {
   const page = await context.newPage();

@@ -166,9 +166,10 @@ export default function RoomPage() {
         settings: snapshot.settings,
         status: snapshot.status,
       });
-      // The snapshot's per-socket yourPlayerId is the authoritative identity
-      // for both guest and registered users.
-      s.setMyPlayerId(snapshot.yourPlayerId ?? null);
+      // yourPlayerId is only present on the personalized snapshot sent by the
+      // gateway at join. Broadcast snapshots omit it, so keep our existing id
+      // instead of clearing it and misclassifying the host as a guest.
+      if (snapshot.yourPlayerId) s.setMyPlayerId(snapshot.yourPlayerId);
       s.setScores(snapshot.players.map(p => ({ playerId: p.id, points: p.score, delta: 0 })));
     });
 

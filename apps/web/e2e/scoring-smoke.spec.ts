@@ -1,12 +1,14 @@
 import { test, expect } from '@playwright/test';
 
+const API = process.env.E2E_API_URL ?? 'http://localhost:3001';
+
 test('API health check + scoring endpoints exist', async ({ request }) => {
   // API reachable
-  const flags = await request.get('http://localhost:3001/api/flags');
+  const flags = await request.get(`${API}/api/flags`);
   expect(flags.ok()).toBeTruthy();
 
   // Guest session creation works
-  const guest = await request.post('http://localhost:3001/api/guest-sessions', {
+  const guest = await request.post(`${API}/api/guest-sessions`, {
     data: { nickname: 'SmokeTest' },
   });
   expect(guest.ok()).toBeTruthy();
@@ -15,7 +17,7 @@ test('API health check + scoring endpoints exist', async ({ request }) => {
   expect(guestData.playerId).toBeTruthy();
 
   // Room creation
-  const room = await request.post('http://localhost:3001/api/rooms', {
+  const room = await request.post(`${API}/api/rooms`, {
     headers: { Authorization: `Bearer ${guestData.token}` },
     data: { settings: { mode: 'CLASSIC', rounds: 1, turnDuration: 60, maxPlayers: 8 } },
   });
@@ -24,7 +26,7 @@ test('API health check + scoring endpoints exist', async ({ request }) => {
   expect(roomData.roomCode).toBeTruthy();
 
   // Room info
-  const roomInfo = await request.get(`http://localhost:3001/api/rooms/${roomData.roomCode}`);
+  const roomInfo = await request.get(`${API}/api/rooms/${roomData.roomCode}`);
   expect(roomInfo.ok()).toBeTruthy();
 
   console.log('✅ API smoke test passed');

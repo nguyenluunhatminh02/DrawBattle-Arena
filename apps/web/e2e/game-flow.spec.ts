@@ -1,6 +1,7 @@
 import { test, expect, BrowserContext, Page } from '@playwright/test';
 
-const WEB = 'http://localhost:3002';
+const WEB = process.env.E2E_WEB_URL ?? 'http://localhost:3002';
+const API = process.env.E2E_API_URL ?? 'http://localhost:3001';
 
 async function setupPlayer(context: BrowserContext, nickname: string): Promise<Page> {
   const page = await context.newPage();
@@ -190,9 +191,14 @@ test.describe('Quick Challenge', () => {
 
 test.describe('Profanity Filter', () => {
   test('rejects profane nicknames', async ({ request }) => {
-    const res = await request.post('http://127.0.0.1:3001/api/guest-sessions', {
+    const res = await request.post(`${API}/api/guest-sessions`, {
       data: { nickname: 'fuckface' },
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // Keep this test in its own throttle bucket: rate-limiting tests share
+        // the same guest-creation key and would otherwise return 429 here.
+        'X-Forwarded-For': '203.0.113.77',
+      },
     });
     expect(res.status()).toBe(400);
   });
@@ -202,7 +208,7 @@ test.describe('API Rate Limiting', () => {
   test('guest creation rate limited after 10 requests', async ({ request }) => {
     const results: number[] = [];
     for (let i = 0; i < 15; i++) {
-      const res = await request.post('http://127.0.0.1:3001/api/guest-sessions', {
+      const res = await request.post(`${API}/api/guest-sessions`, {
         data: { nickname: `User${i}` },
         headers: { 'Content-Type': 'application/json' },
       });
