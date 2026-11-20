@@ -114,7 +114,7 @@ export class FunnelService implements OnModuleDestroy {
           data: batch.map(item => ({
             event: item.event,
             sessionId: item.sessionId,
-            data: item.data,
+            data: item.data as never,
             createdAt: new Date(item.ts),
           })),
         });

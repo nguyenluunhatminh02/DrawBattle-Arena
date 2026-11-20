@@ -293,7 +293,7 @@ export class PrismaJobStore implements JobStore {
    */
   private async claimWhere(where: Record<string, unknown>, holder: string, now: Date) {
     const claimed = await this.prisma.renderJob.updateMany({
-      where,
+      where: where as never,
       data: { state: 'running', lockedBy: holder, lockedAt: now, updatedAt: now },
     });
     if (claimed.count === 0) return null;
@@ -311,7 +311,7 @@ export class PrismaJobStore implements JobStore {
       ],
     };
     const claimed = await this.prisma.renderJob.updateMany({
-      where,
+      where: where as never,
       data: { state: 'running', lockedBy: holder, lockedAt: now, updatedAt: now },
     });
     if (claimed.count === 0) return null;
