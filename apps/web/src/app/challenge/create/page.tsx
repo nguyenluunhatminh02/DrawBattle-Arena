@@ -38,10 +38,12 @@ export default function ChallengeCreatePage() {
   const finishRef = useRef<() => void>(() => {});
   strokesRef.current = strokes;
   const drawingRef = useRef(false);
+  const activePointerIdRef = useRef<number | null>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [finalizeError, setFinalizeError] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => setHydrated(true), []);
@@ -53,6 +55,7 @@ export default function ChallengeCreatePage() {
 
   async function handleStart() {
     if (!player) return;
+    setStartError(null);
     setLoading(true);
     try {
       const res = await api.createChallenge(player.token);
@@ -62,7 +65,8 @@ export default function ChallengeCreatePage() {
       setTimeLeft(res.timeLimit);
       setStarted(true);
       setLoading(false);
-    } catch {
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : 'Không thể bắt đầu thách thức. Vui lòng thử lại.');
       setLoading(false);
     }
   }
@@ -161,8 +165,9 @@ export default function ChallengeCreatePage() {
   }
 
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (finished) return;
+    if (finished || drawingRef.current) return;
     e.preventDefault();
+    activePointerIdRef.current = e.pointerId;
     try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch {}
     const p = getPoint(e);
     if (!p) return;
@@ -172,6 +177,7 @@ export default function ChallengeCreatePage() {
 
   function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
     if (!drawingRef.current || !currentStrokeRef.current) return;
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
     e.preventDefault();
     const p = getPoint(e);
     if (!p) return;
@@ -181,10 +187,19 @@ export default function ChallengeCreatePage() {
 
   function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
     if (!drawingRef.current || !currentStrokeRef.current) return;
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
     e.preventDefault();
     drawingRef.current = false;
+    activePointerIdRef.current = null;
     const s = currentStrokeRef.current;
     setStrokes(prev => [...prev, s]);
+    currentStrokeRef.current = null;
+  }
+
+  // Cancelled pointers must not be committed as completed strokes.
+  function handlePointerCancel() {
+    drawingRef.current = false;
+    activePointerIdRef.current = null;
     currentStrokeRef.current = null;
   }
 
@@ -252,6 +267,9 @@ export default function ChallengeCreatePage() {
               <Button className="min-h-11 w-full" size="lg" onClick={handleStart} disabled={loading} aria-busy={loading}>
                 {loading ? 'Đang tạo thách thức...' : 'Bắt đầu vẽ'}
               </Button>
+              {startError && (
+                <p role="alert" className="text-sm text-danger-on-arena">{startError}</p>
+              )}
               {loading && (
                 <p role="status" className="text-sm text-muted-on-arena">Đang chuẩn bị từ ngẫu nhiên...</p>
               )}
@@ -332,7 +350,8 @@ export default function ChallengeCreatePage() {
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
-              onPointerCancel={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
+              onLostPointerCapture={handlePointerCancel}
             />
           </div>
           {finished && (

@@ -204,12 +204,21 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
     ctx.restore();
   };
 
+  const releasePointer = () => {
+    drawingRef.current = false;
+    activePointerIdRef.current = null;
+    if (batchTimerRef.current) {
+      clearInterval(batchTimerRef.current);
+      batchTimerRef.current = null;
+    }
+    currentStrokeRef.current = null;
+    pendingPointsRef.current = [];
+  };
+
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawer || !drawingRef.current || !currentStrokeRef.current) return;
     if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
     e.preventDefault();
-    drawingRef.current = false;
-    activePointerIdRef.current = null;
     if (batchTimerRef.current) {
       clearInterval(batchTimerRef.current);
       batchTimerRef.current = null;
@@ -217,7 +226,14 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
     flushBatch();
     const stroke = currentStrokeRef.current;
     onStrokeEnd?.({ turnId, strokeId: stroke.strokeId });
-    currentStrokeRef.current = null;
+    releasePointer();
+  };
+
+  // A cancelled pointer (system gesture, incoming call, lost capture) must not
+  // be committed as a completed stroke.
+  const handlePointerCancel = () => {
+    if (!isDrawer) return;
+    releasePointer();
   };
 
   useEffect(() => {
@@ -238,7 +254,8 @@ export function DrawingCanvas({ strokes, isDrawer, turnId, onStroke, onStrokeSta
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handlePointerCancel}
         />
       </div>
       {isDrawer && (

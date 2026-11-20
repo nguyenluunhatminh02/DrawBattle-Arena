@@ -45,6 +45,7 @@ export default function HomePage() {
   const [avatar, setAvatar] = useState('🐱');
   const [roomCode, setRoomCode] = useState('');
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<RoomSettingsForm>(DEFAULT_SETTINGS);
   const setPlayer = useGameStore(s => s.setPlayer);
@@ -78,13 +79,14 @@ export default function HomePage() {
     }
     if (storedPlayer && storedPlayer.nickname === name && storedPlayer.token) return storedPlayer;
     const session = await api.createGuest(name);
-    const p = { token: session.token, playerId: session.playerId, nickname: name };
+    const p = { token: session.token, playerId: session.playerId, nickname: name, avatar };
     setPlayer(p);
     return p;
   }
 
   async function handleCreateRoom() {
     if (!nickname.trim()) return;
+    setErrorMsg(null);
     setLoading(true);
     try {
       const p = await ensureSession(nickname);
@@ -105,7 +107,8 @@ export default function HomePage() {
         body: JSON.stringify({ event: 'room_created', sessionId: p.playerId, data: { roomCode: room.roomCode } }),
       }).catch(() => {});
       router.push(`/room/${room.roomCode}`);
-    } catch {
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo phòng. Vui lòng thử lại.');
       setLoading(false);
     }
   }
@@ -131,29 +134,34 @@ export default function HomePage() {
     try {
       await ensureSession(nickname);
       router.push(`/room/${roomCode.toUpperCase()}`);
-    } catch {
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể vào phòng. Vui lòng thử lại.');
       setLoading(false);
     }
   }
 
   async function handleChallenge() {
+    setErrorMsg(null);
     if (!nickname.trim()) return;
     setLoading(true);
     try {
       await ensureSession(nickname);
       router.push('/challenge/create');
-    } catch {
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo thách thức. Vui lòng thử lại.');
       setLoading(false);
     }
   }
 
   async function handleDaily() {
+    setErrorMsg(null);
     if (!nickname.trim()) return;
     setLoading(true);
     try {
       await ensureSession(nickname);
       router.push('/daily');
-    } catch {
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể tải thách thức hàng ngày. Vui lòng thử lại.');
       setLoading(false);
     }
   }
@@ -215,6 +223,12 @@ export default function HomePage() {
                   </button>
                 ))}
               </div>
+
+              {errorMsg && (
+                <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-danger-on-arena">
+                  {errorMsg}
+                </p>
+              )}
 
               <div className="space-y-2">
                 <Button

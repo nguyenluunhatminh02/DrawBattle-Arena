@@ -6,19 +6,35 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { createHash } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
+import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { generateRoomCode, getModeConfig, GAME_CONSTANTS } from '@drawbattle/shared';
 import type { RoomSettings } from '@drawbattle/shared';
 
-function hashRoomPassword(password: string): string {
+/**
+ * New room passwords use bcrypt. The legacy salted SHA-256 format is still
+ * accepted so rooms created before the upgrade remain joinable.
+ */
+async function hashRoomPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, 10);
+}
+
+function legacyPasswordHash(password: string): string {
   return createHash('sha256').update(`room-pwd:${password}`).digest('hex');
 }
 
-function verifyRoomPassword(password: string | undefined, hash: string | undefined): boolean {
+async function verifyRoomPassword(
+  password: string | undefined,
+  hash: string | undefined,
+): Promise<boolean> {
   if (!hash) return true;
   if (!password) return false;
-  return hashRoomPassword(password) === hash;
+  if (hash.startsWith('$2')) return bcrypt.compare(password, hash);
+
+  const expected = legacyPasswordHash(password);
+  if (hash.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(hash, 'utf8'), Buffer.from(expected, 'utf8'));
 }
 
 const DEFAULT_SETTINGS: RoomSettings = {
@@ -44,7 +60,7 @@ export class RoomService {
   ) {
     const merged: RoomSettings = { ...DEFAULT_SETTINGS, ...settings };
     if (merged.password) {
-      (merged as any).passwordHash = hashRoomPassword(merged.password);
+      (merged as any).passwordHash = await hashRoomPassword(merged.password);
       delete (merged as any).password;
     }
     const modeConfig = getModeConfig(merged.mode);
@@ -164,7 +180,7 @@ export class RoomService {
       // A reconnecting player is still subject to the room password. Checking
       // this before the early return prevents password-free rejoin while the
       // disconnect grace timer has not yet persisted leftAt.
-      if (settings.passwordHash && !verifyRoomPassword(password, settings.passwordHash)) {
+      if (settings.passwordHash && !(await verifyRoomPassword(password, settings.passwordHash))) {
         throw new BadRequestException('Invalid password');
       }
 

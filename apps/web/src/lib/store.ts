@@ -6,6 +6,7 @@ interface Player {
   token: string;
   playerId: string;
   nickname: string;
+  avatar?: string;
 }
 
 interface User {
