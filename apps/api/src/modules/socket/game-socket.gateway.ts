@@ -14,6 +14,7 @@ import { AuthService } from '../auth/auth.service';
 import { RoomService } from '../room/room.service';
 import { GameStateService, RoomEvent } from '../game/game-state.service';
 import { RedisAdapterService } from './redis-adapter.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import { validateStrokeCoordinates } from '@drawbattle/shared';
 import type { StrokeChunk } from '@drawbattle/shared';
 import { containsProfanity } from '../../common/profanity';
@@ -53,6 +54,7 @@ export class GameSocketGateway
     private readonly roomService: RoomService,
     private readonly game: GameStateService,
     private readonly redisAdapter: RedisAdapterService,
+    private readonly prisma: PrismaService,
   ) {}
 
   afterInit(server: Server) {

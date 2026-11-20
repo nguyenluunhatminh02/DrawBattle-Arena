@@ -1,0 +1,41 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - heading "DrawBattle" [level=1] [ref=e5]
+      - paragraph [ref=e6]: Vẽ nhanh, đoán nhanh, cười cùng bạn bè
+    - generic [ref=e7]:
+      - heading "Nickname & Avatar" [level=3] [ref=e9]
+      - generic [ref=e10]:
+        - textbox "Nhập tên của bạn..." [ref=e11]
+        - generic [ref=e12]:
+          - button "🐱" [ref=e13] [cursor=pointer]
+          - button "🐶" [ref=e14] [cursor=pointer]
+          - button "🐻" [ref=e15] [cursor=pointer]
+          - button "🦊" [ref=e16] [cursor=pointer]
+          - button "🐼" [ref=e17] [cursor=pointer]
+          - button "🐨" [ref=e18] [cursor=pointer]
+          - button "🦁" [ref=e19] [cursor=pointer]
+          - button "🐸" [ref=e20] [cursor=pointer]
+          - button "🐙" [ref=e21] [cursor=pointer]
+          - button "🦄" [ref=e22] [cursor=pointer]
+          - button "🐲" [ref=e23] [cursor=pointer]
+          - button "🎃" [ref=e24] [cursor=pointer]
+    - generic [ref=e25]:
+      - generic [ref=e26]:
+        - button "Cổ điển" [ref=e27] [cursor=pointer]
+        - button "Speed Round" [ref=e28] [cursor=pointer]
+        - button "1v1 Duel" [ref=e29] [cursor=pointer]
+        - button "Đội chiến" [ref=e30] [cursor=pointer]
+      - generic [ref=e31]:
+        - button "Tạo phòng Cổ điển" [disabled]
+        - button "Tùy chỉnh cài đặt phòng" [ref=e32] [cursor=pointer]
+      - generic [ref=e34]:
+        - textbox "Mã phòng" [ref=e35]
+        - button "Vào" [disabled]
+      - button "Thách bạn bè" [disabled]
+      - button "Thử thách hàng ngày" [disabled]
+      - generic [ref=e36]:
+        - link "Lịch sử" [ref=e37] [cursor=pointer]:
+          - /url: /history
+        - link "Bảng xếp hạng" [ref=e38] [cursor=pointer]:
+          - /url: /leaderboard
