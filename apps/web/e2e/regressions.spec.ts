@@ -111,16 +111,16 @@ test.describe('E2E regression matrix', () => {
     await expect(canvas).toBeVisible();
     // The canvas is sized by a ResizeObserver; wait for the first resize pass.
     await expect.poll(async () => canvas.evaluate((el: HTMLCanvasElement) => el.width)).toBeGreaterThan(0);
-    // A real drawing must be painted, not an empty white canvas.
-    const painted = await canvas.evaluate((el: HTMLCanvasElement) => {
+    // A real drawing must be painted, not an empty white canvas. The replay
+    // animates via requestAnimationFrame, so poll until pixels are drawn.
+    await expect.poll(async () => canvas.evaluate((el: HTMLCanvasElement) => {
       const ctx = el.getContext('2d')!;
       const data = ctx.getImageData(0, 0, el.width, el.height).data;
       for (let i = 0; i < data.length; i += 4) {
         if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) return true;
       }
       return false;
-    });
-    expect(painted).toBe(true);
+    })).toBe(true);
     await ctx.close();
   });
 
