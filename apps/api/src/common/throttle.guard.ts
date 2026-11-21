@@ -69,16 +69,15 @@ type Bucket = { count: number; resetAt: number };
  * Resolve a throttle identity from a verified *user* principal. Global guards
  * run before controller-level `OptionalAuthGuard`, so `request.user` may not
  * be populated when this guard executes. Verifying the bearer token here (with
- * the same JWT_SECRET and algorithm as JwtService) keeps identity-based
- * buckets working regardless of guard registration order; forged/invalid
- * tokens fall back to the trusted `req.ip` bucket.
+ * the same JWT_SECRET and algorithm as JwtService) keeps identity buckets
+ * working regardless of guard registration order; forged/invalid tokens fall
+ * back to the trusted `req.ip` bucket only.
  *
  * Guest tokens are deliberately ignored: anyone can mint as many as they like
  * and rotating their `sub` must not split an IP's bucket. For the same reason
  * only the signed `type === 'user'` sub is accepted, so a caller cannot choose
  * an arbitrary bucket key. Database validity checks (deleted users) remain in
  * the auth guards; a stale user token can at worst exhaust its own bucket.
- * The resolved IP is always part of the final key, never replaced by identity.
  */
 function userIdentity(request: {
   headers?: Record<string, unknown>;
@@ -114,11 +113,14 @@ function userIdentity(request: {
 }
 
 /**
- * Global HTTP throttle. Uses a shared Redis fixed-window bucket when REDIS_URL
- * is configured and the client is connected; otherwise it falls back to the
- * original process-local buckets. After a Redis error it retries on a cooldown
- * (or as soon as Redis reports ready again), and logs at most once a minute.
- * Redis failures never fail a request.
+ * Global HTTP throttle. Every request consumes an IP bucket. Verified users
+ * also consume a separate identity bucket, so rotating IPs cannot raise their
+ * per-identity limit and rotating identities cannot raise an IP's limit. The
+ * stricter bound wins: if either bucket is over, the request is rejected.
+ * Uses shared Redis fixed-window buckets when REDIS_URL is configured and the
+ * client is connected; otherwise it falls back to process-local buckets. After
+ * a Redis error it retries on a cooldown (or as soon as Redis reports ready
+ * again), and logs at most once a minute. Redis failures never fail open.
  */
 @Injectable()
 export class ThrottleGuard implements CanActivate, OnModuleDestroy {
@@ -142,12 +144,13 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     // Never key on a raw client-supplied header (CF-Connecting-IP /
     // X-Forwarded-For): it is spoofable unless the trusted edge overwrites it.
     // Express resolves req.ip from trusted proxy hops via `trust proxy`.
-    // The identity resolver also checks the signed bearer token because this
-    // global guard runs before route-level OptionalAuthGuard. The resolved IP
-    // is a mandatory floor: identity may narrow a bucket, never replace it.
     const ip = request.ip ?? request.socket?.remoteAddress ?? 'unknown';
+    const prefix = config.keyPrefix ?? 'global';
+    // IP is the mandatory floor for every caller. A verified identity adds an
+    // independent bucket; guests/forged tokens must not create extra buckets.
+    const keys = [`${prefix}:ip:${ip}`];
     const identity = userIdentity(request);
-    const key = `${config.keyPrefix ?? 'global'}:${ip}:${identity ?? 'anon'}`;
+    if (identity) keys.push(`${prefix}:identity:${identity}`);
 
     // parseInt yields NaN for malformed values; `|| 1` hides that but also
     // silently accepts negatives/fractionals. Clamp to a finite positive
@@ -156,9 +159,17 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     const mult = Number.isFinite(parsedMult) && parsedMult > 0 ? Math.floor(parsedMult) : 1;
     const limit = config.limit * mult;
 
-    const allowed = this.redis && Date.now() >= this.redisRetryAfter
-      ? await this.checkRedis(key, config.windowMs, limit)
-      : this.checkLocal(key, config.windowMs, limit);
+    const useRedis = Boolean(this.redis && Date.now() >= this.redisRetryAfter);
+    let allowed = true;
+    // Check every required bucket even after a rejection: each request must
+    // consume one token from each bucket, otherwise a rejected request could
+    // leave one bucket under-counted and let a later request slip through.
+    for (const key of keys) {
+      const bucketAllowed = useRedis
+        ? await this.checkRedis(key, config.windowMs, limit)
+        : this.checkLocal(key, config.windowMs, limit);
+      if (!bucketAllowed) allowed = false;
+    }
     if (!allowed) {
       recordMetric('throttle_rejects_total');
       recordMetric(`throttle_rejects_${config.keyPrefix ?? 'global'}`);
@@ -217,7 +228,7 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
       // Pause Redis briefly: repeated awaited failures on every request would
       // add latency and log noise while Redis is down, but a permanent latch
       // would never notice recovery. The cooldown is also cleared by 'ready'.
-      this.redisRetryAfter = Date.now() + REDIS_RETRY_MS;
+      if (this.redisRetryAfter < Date.now()) this.redisRetryAfter = Date.now() + REDIS_RETRY_MS;
       return this.checkLocal(key, windowMs, limit);
     }
   }

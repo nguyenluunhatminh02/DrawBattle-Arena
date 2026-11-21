@@ -100,10 +100,11 @@ describe('ThrottleGuard', () => {
     await expect(guard.canActivate(ctxB)).rejects.toThrow();
   });
 
-  it('keys buckets by authenticated identity alongside the resolved IP', async () => {
+  it('enforces an identity bucket independent of the IP bucket', async () => {
     mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'identity-test' });
+    // Distinct IPs keep the IP buckets separate, isolating the identity bucket.
     const ctxA = makeContext('127.0.0.1', { user: { id: 'user-a' } });
-    const ctxB = makeContext('127.0.0.1', { user: { id: 'user-b' } });
+    const ctxB = makeContext('10.0.0.8', { user: { id: 'user-b' } });
     await expect(guard.canActivate(ctxA)).resolves.toBe(true);
     await expect(guard.canActivate(ctxB)).resolves.toBe(true);
     await expect(guard.canActivate(ctxA)).rejects.toThrow();
@@ -112,8 +113,9 @@ describe('ThrottleGuard', () => {
   it('keys buckets by bearer-token identity before route guards populate request.user', async () => {
     mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'bearer-identity' });
     const tokenFor = (id: string) => jwt.sign({ sub: id, type: 'user' }, JWT_SECRET);
+    // Different IPs keep the IP buckets independent of the identity bucket.
     const ctxA = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${tokenFor('user-a')}` } });
-    const ctxB = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${tokenFor('user-b')}` } });
+    const ctxB = makeContext('10.0.0.8', { headers: { authorization: `Bearer ${tokenFor('user-b')}` } });
     await expect(guard.canActivate(ctxA)).resolves.toBe(true);
     await expect(guard.canActivate(ctxB)).resolves.toBe(true);
     await expect(guard.canActivate(ctxA)).rejects.toThrow();
@@ -157,24 +159,36 @@ describe('ThrottleGuard', () => {
     ).rejects.toThrow();
   });
 
-  it('keeps the IP in verified user buckets and separates different IPs', async () => {
-    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'user-ip-bucket' });
+  it('does not let a verified user raise their limit by rotating IPs', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'user-ip-rotation' });
     const token = jwt.sign({ sub: 'user-a', type: 'user' }, JWT_SECRET);
-    const buckets = (guard as any).buckets as Map<string, unknown>;
+    const forIp = (ip: string) =>
+      makeContext(ip, { headers: { authorization: `Bearer ${token}` } });
 
-    const ctxSameIp = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${token}` } });
-    const ctxOtherIp = makeContext('10.0.0.9', { headers: { authorization: `Bearer ${token}` } });
-    await expect(guard.canActivate(ctxSameIp)).resolves.toBe(true);
-    // Same identity but a different IP is a different bucket.
-    await expect(guard.canActivate(ctxOtherIp)).resolves.toBe(true);
-    await expect(guard.canActivate(ctxSameIp)).rejects.toThrow();
+    await expect(guard.canActivate(forIp('10.0.0.1'))).resolves.toBe(true);
+    // The identity bucket was consumed by the first IP. Every later IP shares
+    // it, so rotating IPs cannot buy another request for the same user.
+    for (const ip of ['10.0.0.2', '10.0.0.3', '10.0.0.4']) {
+      await expect(guard.canActivate(forIp(ip))).rejects.toThrow();
+    }
+  });
 
-    const keys = [...buckets.keys()];
-    expect(keys).toHaveLength(2);
-    expect(keys).toEqual(expect.arrayContaining([
-      expect.stringContaining('127.0.0.1'),
-      expect.stringContaining('10.0.0.9'),
-    ]));
+  it('shares one IP bucket across different verified identities', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'user-ip-cap' });
+    const tokenFor = (id: string) => jwt.sign({ sub: id, type: 'user' }, JWT_SECRET);
+    const forUser = (id: string) =>
+      makeContext('127.0.0.1', { headers: { authorization: `Bearer ${tokenFor(id)}` } });
+
+    await expect(guard.canActivate(forUser('user-a'))).resolves.toBe(true);
+    // A different identity on the same IP still consumes that IP's single cap.
+    await expect(guard.canActivate(forUser('user-b'))).rejects.toThrow();
+  });
+
+  it('gives an anonymous caller from one IP the same bucket', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'anon-ip-cap' });
+    await expect(guard.canActivate(makeContext('127.0.0.1'))).resolves.toBe(true);
+    await expect(guard.canActivate(makeContext('127.0.0.1'))).rejects.toThrow();
+    await expect(guard.canActivate(makeContext('10.0.0.9'))).resolves.toBe(true);
   });
 
   it('treats forged tokens like anonymous callers from the same IP', async () => {
@@ -199,7 +213,8 @@ describe('ThrottleGuard', () => {
     await expect(guard.canActivate(makeContext('127.0.0.1'))).rejects.toThrow();
 
     expect([...buckets.keys()]).toHaveLength(1);
-    expect([...buckets.keys()][0]).toContain('anon');
+    expect([...buckets.keys()][0]).toContain('127.0.0.1');
+    expect([...buckets.keys()][0]).not.toContain('identity');
   });
 
   it('bounds the bucket map against rotating identities', async () => {
@@ -207,7 +222,11 @@ describe('ThrottleGuard', () => {
     const buckets = (guard as any).buckets as Map<string, unknown>;
 
     for (let i = 0; i < 10_020; i++) {
-      await guard.canActivate(makeContext('127.0.0.1', { user: { id: `rotating-${i}` } }));
+      // A fresh IP per identity keeps the shared IP bucket out of the way.
+      const ctx = makeContext(`10.1.${Math.floor(i / 250)}.${(i % 250) + 1}`, {
+        user: { id: `rotating-${i}` },
+      });
+      await guard.canActivate(ctx).catch(() => undefined);
     }
 
     expect(buckets.size).toBeLessThanOrEqual(10_000);
@@ -256,6 +275,28 @@ describe('ThrottleGuard', () => {
       expect(evalMock.mock.calls[0][0]).toContain("redis.call('INCR'");
       await guardA.onModuleDestroy();
       await guardB.onModuleDestroy();
+    });
+
+    it('checks independent IP and identity buckets with the same atomic script', async () => {
+      mockReflector.get.mockReturnValue({ limit: 1, windowMs: 60_000, keyPrefix: 'redis-dual' });
+      const redisGuard = new ThrottleGuard(mockReflector);
+      const token = jwt.sign({ sub: 'user-a', type: 'user' }, JWT_SECRET);
+      const forIp = (ip: string) =>
+        makeContext(ip, { headers: { authorization: `Bearer ${token}` } });
+
+      await expect(redisGuard.canActivate(forIp('10.2.0.1'))).resolves.toBe(true);
+      expect(evalMock).toHaveBeenCalledTimes(2);
+      expect(evalMock.mock.calls[0][0]).toBe(evalMock.mock.calls[1][0]);
+      expect(evalMock.mock.calls[0][0]).toContain("redis.call('INCR'");
+      const keys: string[] = evalMock.mock.calls.map(call => call[1].keys[0]);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toContain(':ip:10.2.0.1');
+      expect(keys[1]).toContain('identity:user:user-a');
+
+      // Both buckets are at their limit: rotating the IP still hits identity.
+      await expect(redisGuard.canActivate(forIp('10.2.0.2'))).rejects.toThrow();
+      expect(evalMock).toHaveBeenCalledTimes(4);
+      await redisGuard.onModuleDestroy();
     });
 
     it('falls back after a Redis failure but retries Redis after the cooldown', async () => {
