@@ -38,6 +38,15 @@ function makeGateway() {
     joinRoom: jest.fn().mockResolvedValue({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' }),
     banPlayer: jest.fn().mockResolvedValue({ userId: null, guestSessionId: 'guest-1' }),
     leaveRoom: jest.fn().mockResolvedValue(undefined),
+    getRoomById: jest.fn().mockResolvedValue({
+      id: 'room-1',
+      status: 'WAITING',
+      hostPlayerId: 'host',
+      settings: { maxPlayers: 8 },
+      players: [{ id: 'host', nicknameSnapshot: 'Host' }, { id: 'p1', nicknameSnapshot: 'Player' }],
+    }),
+    resetRoomStatus: jest.fn().mockResolvedValue(undefined),
+    updateHost: jest.fn().mockResolvedValue(undefined),
   };
   const game = {
     setPlayerOnline: jest.fn(),
@@ -284,6 +293,105 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
   });
 });
 
+describe('GameSocketGateway room switch failure recovery', () => {
+  function authedData(sessionId: string) {
+    return {
+      identityType: 'guest' as const,
+      sessionId,
+      nickname: 'Player',
+    };
+  }
+
+  function seedOldRoom(gateway: GameSocketGateway, socket: any) {
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', socket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: socket.id });
+    socket.data.playerId = 'p1';
+    socket.data.roomId = 'room-1';
+    socket.data.roomCode = 'AAA111';
+    socket.join('room-1');
+  }
+
+  it('restores the old room when the destination join fails after a successful leave', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+    seedOldRoom(gateway, socket);
+    roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
+    roomService.joinRoom.mockRejectedValueOnce(new Error('db down')).mockResolvedValue({
+      roomId: 'room-1', roomCode: 'AAA111', playerId: 'p1',
+    });
+
+    await gateway.onRoomJoin(socket, { roomCode: 'BBB222' });
+
+    expect(roomService.leaveRoom).toHaveBeenCalledWith('room-1', 'p1');
+    expect(roomService.joinRoom).toHaveBeenLastCalledWith(
+      'AAA111', 'Player', 'guest-1', null,
+    );
+    expect(socket.data.roomId).toBe('room-1');
+    expect(socket.data.playerId).toBe('p1');
+    expect(socket.rooms.has('room-1')).toBe(true);
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(socket);
+    expect(socket.emit).toHaveBeenCalledWith('error', 'JOIN_FAILED', 'Could not join room');
+  });
+
+  it('leaves no stale active membership when restoring the old room also fails', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+    seedOldRoom(gateway, socket);
+    roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
+    roomService.joinRoom.mockRejectedValue(new Error('db down'));
+
+    await gateway.onRoomJoin(socket, { roomCode: 'BBB222' });
+
+    expect(socket.data.roomId).toBeUndefined();
+    expect(socket.data.playerId).toBeUndefined();
+    expect(socket.rooms.has('room-1')).toBe(false);
+    expect((gateway as any).roomSockets.has('room-1')).toBe(false);
+    expect((gateway as any).activeMemberships.has('room-1\u0000p1')).toBe(false);
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SWITCH_FAILED', 'Could not join room or restore the previous room');
+  });
+
+  it('does not evict a replacement socket registered during the leave await', async () => {
+    const { gateway, roomService } = makeGateway();
+    const oldSocket = makeSocket('old-socket', {
+      ...authedData('guest-1'), playerId: 'p1', roomId: 'room-1', roomCode: 'AAA111',
+    });
+    oldSocket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
+    const replacement = makeSocket('replacement-socket', authedData('guest-1'));
+
+    // Register the replacement while the old socket's leave is in flight.
+    roomService.leaveRoom.mockImplementation(async () => {
+      (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 99, socketId: replacement.id });
+      (gateway as any).roomSockets.get('room-1').set('p1', replacement);
+      oldSocket.data.roomId = undefined;
+      oldSocket.data.playerId = undefined;
+    });
+
+    await (gateway as any).leaveCurrentRoom(oldSocket);
+
+    expect((gateway as any).activeMemberships.get('room-1\u0000p1').socketId).toBe(replacement.id);
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(replacement);
+    expect(replacement.data.roomId).toBeUndefined();
+  });
+
+  it('rolls back the destination row when post-join setup fails', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+    roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
+    roomService.joinRoom.mockResolvedValue({ roomId: 'room-2', roomCode: 'BBB222', playerId: 'p2' });
+    game.getSnapshot.mockReturnValue(null);
+    roomService.getRoomById.mockRejectedValue(new Error('db down'));
+
+    await gateway.onRoomJoin(socket, { roomCode: 'BBB222' });
+
+    expect(roomService.leaveRoom).toHaveBeenCalledWith('room-2', 'p2');
+    expect(socket.rooms.has('room-2')).toBe(false);
+    expect((gateway as any).roomSockets.has('room-2')).toBe(false);
+    expect((gateway as any).activeMemberships.has('room-2\u0000p2')).toBe(false);
+  });
+});
+
 describe('GameSocketGateway ready state validation', () => {
   it('ignores ready events from a stale socket that still carries room data', () => {
     const { gateway, game } = makeGateway();
@@ -311,6 +419,31 @@ describe('GameSocketGateway ready state validation', () => {
     expect(socket.emit).toHaveBeenCalledWith('error', 'INVALID_PAYLOAD', 'Invalid ready state');
   });
 
+  it.each([undefined, null])('rejects %s ready payloads before checking membership', payload => {
+    const { gateway, game, server } = makeGateway();
+    const stale = makeSocket('stale-socket', { playerId: 'p1', roomId: 'room-1' });
+
+    gateway.onReady(stale, payload as any);
+
+    expect(stale.emit).toHaveBeenCalledWith('error', 'INVALID_PAYLOAD', 'Invalid ready state');
+    expect(game.setReady).not.toHaveBeenCalled();
+    expect(server.to).not.toHaveBeenCalled();
+  });
+
+  it('does not broadcast room updates for stale ready events', () => {
+    const { gateway, game, server } = makeGateway();
+    const live = makeSocket('live-socket', { playerId: 'p1', roomId: 'room-1' });
+    const stale = makeSocket('stale-socket', { playerId: 'p1', roomId: 'room-1' });
+    live.join('room-1');
+    stale.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', live]]));
+
+    gateway.onReady(stale, true);
+
+    expect(game.setReady).not.toHaveBeenCalled();
+    expect(server.to).not.toHaveBeenCalled();
+  });
+
   it('accepts boolean ready payloads from the active member', () => {
     const { gateway, game } = makeGateway();
     const socket = makeSocket('s1', { playerId: 'p1', roomId: 'room-1' });
@@ -320,6 +453,62 @@ describe('GameSocketGateway ready state validation', () => {
     gateway.onReady(socket, true);
 
     expect(game.setReady).toHaveBeenCalledWith('room-1', 'p1', true);
+    expect(socket.emit).not.toHaveBeenCalledWith('error', expect.anything(), expect.anything());
+  });
+});
+
+describe('GameSocketGateway settings update errors', () => {
+  function makeHostSocket(gateway: GameSocketGateway) {
+    const socket = makeSocket('host-socket', {
+      playerId: 'host',
+      roomId: 'room-1',
+      roomCode: 'ABC123',
+    });
+    socket.rooms.add('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['host', socket]]));
+    return socket;
+  }
+
+  it('reports a distinct safe code when settings persistence fails', async () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeHostSocket(gateway);
+    game.updateSettings.mockResolvedValue({ ok: false, reason: 'SETTINGS_SAVE_FAILED' });
+
+    await gateway.onUpdateSettings(socket, { rounds: 3 });
+
+    expect(game.updateSettings).toHaveBeenCalledWith('room-1', 'host', { rounds: 3 });
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SETTINGS_SAVE_FAILED', 'Could not save settings');
+    expect(socket.emit).not.toHaveBeenCalledWith('error', 'SETTINGS_FAILED', expect.anything());
+  });
+
+  it('keeps the match-in-progress error when the room is playing', async () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeHostSocket(gateway);
+    game.updateSettings.mockResolvedValue({ ok: false, reason: 'MATCH_IN_PROGRESS' });
+
+    await gateway.onUpdateSettings(socket, { rounds: 3 });
+
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SETTINGS_FAILED', 'Cannot update settings during a match');
+    expect(socket.emit).not.toHaveBeenCalledWith('error', 'SETTINGS_SAVE_FAILED', expect.anything());
+  });
+
+  it('emits a generic safe failure for non-match internal reasons', async () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeHostSocket(gateway);
+    game.updateSettings.mockResolvedValue({ ok: false, reason: 'ROOM_NOT_FOUND' });
+
+    await gateway.onUpdateSettings(socket, { rounds: 3 });
+
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SETTINGS_SAVE_FAILED', 'Could not save settings');
+  });
+
+  it('does not emit an error when the settings update succeeds', async () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeHostSocket(gateway);
+    game.updateSettings.mockResolvedValue({ ok: true });
+
+    await gateway.onUpdateSettings(socket, { rounds: 3 });
+
     expect(socket.emit).not.toHaveBeenCalledWith('error', expect.anything(), expect.anything());
   });
 });

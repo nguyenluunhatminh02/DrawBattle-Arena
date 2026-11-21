@@ -12,7 +12,11 @@ import { ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import type { Server, Socket } from 'socket.io';
 import { AuthService } from '../auth/auth.service';
 import { RoomService } from '../room/room.service';
-import { GameStateService, RoomEvent } from '../game/game-state.service';
+import {
+  GameStateService,
+  isSettingsUpdateFailure,
+  RoomEvent,
+} from '../game/game-state.service';
 import { RedisAdapterService } from './redis-adapter.service';
 import { validateStrokeCoordinates } from '@drawbattle/shared';
 import type { StrokeChunk } from '@drawbattle/shared';
@@ -23,6 +27,24 @@ interface DisconnectTimer {
   roomId: string;
   playerId: string;
   socketId: string;
+}
+
+/**
+ * Monotonic membership generation. A pending async leave can only evict or
+ * restore the slot it originally owned; a replacement socket registers a new
+ * generation, so the older operation becomes a no-op after its awaits.
+ */
+interface ActiveMembership {
+  generation: number;
+  socketId: string;
+}
+
+interface JoinBuild {
+  roomId: string;
+  roomCode: string;
+  playerId: string;
+  generation: number;
+  joinedPlayer: NonNullable<ReturnType<GameStateService['addPlayer']>>;
 }
 
 interface AuthedSocket extends Socket {
@@ -51,6 +73,11 @@ export class GameSocketGateway
 {
   private readonly logger = new Logger(GameSocketGateway.name);
   private readonly roomSockets = new Map<string, Map<string, AuthedSocket>>();
+  /** Ownership tokens for committed player slots, keyed by room + player. */
+  private readonly activeMemberships = new Map<string, ActiveMembership>();
+  /** Per-socket generation for in-flight joins (before the player id is known). */
+  private readonly joinAttempts = new Map<string, number>();
+  private membershipGeneration = 0;
   private readonly disconnectTimers = new Map<string, DisconnectTimer>();
   private readonly kickedSessions = new Map<string, Set<string>>();
   private readonly rateLimits = new Map<string, { count: number; resetAt: number }>();
@@ -141,6 +168,15 @@ export class GameSocketGateway
     return true;
   }
 
+  private static membershipKey(roomId: string, playerId: string): string {
+    return `${roomId}\u0000${playerId}`;
+  }
+
+  /** Read the current ownership token for a player slot. */
+  private getMembership(roomId: string, playerId: string): ActiveMembership | undefined {
+    return this.activeMemberships.get(GameSocketGateway.membershipKey(roomId, playerId));
+  }
+
   /**
    * A socket is a member of at most one game room at a time. Every action
    * handler relies on this exact socket-id match so a superseded socket can
@@ -149,7 +185,95 @@ export class GameSocketGateway
   private isActiveMember(socket: AuthedSocket, roomId: string, playerId: string): boolean {
     if (socket.data.roomId !== roomId || socket.data.playerId !== playerId) return false;
     if (!socket.rooms.has(roomId)) return false;
-    return this.roomSockets.get(roomId)?.get(playerId)?.id === socket.id;
+    if (this.roomSockets.get(roomId)?.get(playerId)?.id !== socket.id) return false;
+    // The generation token guards async handoffs. When no token exists (e.g.
+    // a state restored without an in-flight join), the socket-id match above
+    // remains the authoritative ownership check.
+    const membership = this.getMembership(roomId, playerId);
+    return !membership || membership.socketId === socket.id;
+  }
+
+  /** Claim the slot for a new socket and bump its generation. */
+  private claimMembership(roomId: string, playerId: string, socketId: string): number {
+    const generation = ++this.membershipGeneration;
+    this.activeMemberships.set(GameSocketGateway.membershipKey(roomId, playerId), {
+      generation,
+      socketId,
+    });
+    return generation;
+  }
+
+  /** Begin an in-flight join. A newer join on the same socket supersedes it. */
+  private beginJoinAttempt(socketId: string): number {
+    const generation = ++this.membershipGeneration;
+    this.joinAttempts.set(socketId, generation);
+    return generation;
+  }
+
+  private ownsJoinAttempt(socketId: string, generation: number): boolean {
+    return this.joinAttempts.get(socketId) === generation;
+  }
+
+  private endJoinAttempt(socketId: string, generation: number): void {
+    if (this.ownsJoinAttempt(socketId, generation)) this.joinAttempts.delete(socketId);
+  }
+
+  /** A slot may be claimed only if no replacement socket has taken it. */
+  private canClaimMembership(roomId: string, playerId: string, socketId: string): boolean {
+    const owner = this.getMembership(roomId, playerId);
+    return !owner || owner.socketId === socketId;
+  }
+
+  /** Release a slot only when this socket is still its owner. */
+  private releaseMembershipIfOwner(roomId: string, playerId: string, socketId: string): void {
+    if (this.getMembership(roomId, playerId)?.socketId === socketId) {
+      this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
+    }
+  }
+
+  /**
+   * Commit every socket-side mutation of a join atomically (relative to other
+   * handlers, which never interleave inside this synchronous method). Called
+   * only after all awaits, DB membership and in-memory game state are ready.
+   */
+  private commitJoin(socket: AuthedSocket, build: JoinBuild): boolean {
+    const { roomId, playerId, roomCode, generation, joinedPlayer } = build;
+    // Another socket may have claimed this player slot during an await.
+    if (!this.canClaimMembership(roomId, playerId, socket.id)) return false;
+    this.claimMembership(roomId, playerId, socket.id);
+    this.endJoinAttempt(socket.id, generation);
+    this.clearDisconnectTimer(roomId, playerId, socket.id);
+    socket.data.playerId = playerId;
+    socket.data.roomId = roomId;
+    socket.data.roomCode = roomCode;
+    socket.join(roomId);
+    let map = this.roomSockets.get(roomId);
+    if (!map) {
+      map = new Map();
+      this.roomSockets.set(roomId, map);
+    }
+    map.set(playerId, socket);
+    socket.emit('room:snapshot', {
+      ...this.game.getSnapshot(roomId)!,
+      code: roomCode,
+      yourPlayerId: playerId,
+    });
+    this.server.to(roomId).emit('room:playerJoined', {
+      id: playerId,
+      nickname: socket.data.nickname,
+      isHost: joinedPlayer.isHost,
+      isReady: joinedPlayer.isReady,
+      isOnline: joinedPlayer.isOnline,
+      score: joinedPlayer.score,
+    });
+    this.broadcastRoomUpdate(roomId);
+    const turn = this.game.getTurnSnapshot(roomId);
+    if (turn) {
+      socket.emit('turn:restore', turn);
+      const word = this.game.getDrawerWord(roomId, playerId);
+      if (word) socket.emit('turn:yourWord', { word });
+    }
+    return true;
   }
 
   /**
@@ -160,6 +284,7 @@ export class GameSocketGateway
    * evicting the replacement.
    */
   private revokeReplacedSocket(oldSocket: AuthedSocket, roomId: string, playerId: string): void {
+    this.releaseMembershipIfOwner(roomId, playerId, oldSocket.id);
     this.clearDisconnectTimer(roomId, playerId, oldSocket.id);
     const roomMap = this.roomSockets.get(roomId);
     if (roomMap?.get(playerId)?.id === oldSocket.id) {
@@ -176,30 +301,37 @@ export class GameSocketGateway
   /**
    * Detach a socket from a room it is leaving for a different room. The DB
    * row and in-memory slot are released immediately so the abandoned slot
-   * cannot keep the room full or accept a password-free rejoin.
+   * cannot keep the room full or accept a password-free rejoin. The owner's
+   * identity captured before the await is rechecked before every mutation: a
+   * replacement socket registered mid-write can never be evicted by this
+   * older leave.
    */
-  private async leaveCurrentRoom(socket: AuthedSocket): Promise<void> {
+  private async leaveCurrentRoom(
+    socket: AuthedSocket,
+  ): Promise<{ roomId: string; playerId: string; roomCode?: string; socketId: string } | null> {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
-    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return null;
+    const ownerSocketId = socket.id;
+    const roomCode = socket.data.roomCode;
 
     // Persist the departure before releasing in-memory state so a rejected
     // write aborts the switch and leaves the old membership intact.
-    try {
-      await this.roomService.leaveRoom(roomId, playerId);
-    } catch (err) {
-      this.logger.error(
-        'Failed to mark player left on room switch',
-        err instanceof Error ? err.message : String(err),
-      );
-      throw err;
-    }
+    await this.roomService.leaveRoom(roomId, playerId);
 
+    // Recheck ownership after the await: a replacement socket may own this
+    // slot now. In that case the DB leave is correct, but no local state of
+    // the replacement may be touched.
+    const currentMembership = this.getMembership(roomId, playerId);
+    if (currentMembership && currentMembership.socketId !== ownerSocketId) return null;
+    this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
     this.clearDisconnectTimer(roomId, playerId, socket.id);
     this.game.removePlayer(roomId, playerId);
     const roomMap = this.roomSockets.get(roomId);
-    roomMap?.delete(playerId);
-    if (roomMap?.size === 0) this.roomSockets.delete(roomId);
+    if (roomMap?.get(playerId)?.id === socket.id) {
+      roomMap.delete(playerId);
+      if (roomMap.size === 0) this.roomSockets.delete(roomId);
+    }
     socket.leave(roomId);
     this.server.to(roomId).emit('room:playerLeft', playerId);
     this.broadcastRoomUpdate(roomId);
@@ -207,12 +339,79 @@ export class GameSocketGateway
     socket.data.roomId = undefined;
     socket.data.roomCode = undefined;
     socket.data.playerId = undefined;
+    return { roomId, playerId, roomCode, socketId: ownerSocketId };
+  }
+
+  /**
+   * Best-effort restoration after a failed destination join. Only the socket
+   * that completed the old leave is allowed to reclaim that room; a newer
+   * replacement keeps its slot. Any in-memory result is rolled back if the
+   * DB rejoin fails, so no active row is left without a socket.
+   */
+  private async restorePreviousRoom(
+    socket: AuthedSocket,
+    previous: { roomId: string; playerId: string; roomCode?: string; socketId: string },
+    attemptGeneration: number,
+  ): Promise<boolean> {
+    const { roomId, playerId, roomCode, socketId } = previous;
+    if (!this.ownsJoinAttempt(socket.id, attemptGeneration)) return false;
+    if (this.getMembership(roomId, playerId) && this.getMembership(roomId, playerId)!.socketId !== socketId) {
+      return false;
+    }
+    const nickname = socket.data.nickname;
+    if (!nickname) return false;
+    try {
+      const rejoined = await this.roomService.joinRoom(
+        roomCode ?? '',
+        nickname,
+        socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
+        socket.data.identityType === 'user' ? socket.data.userId! : null,
+      );
+      if (!this.ownsJoinAttempt(socket.id, attemptGeneration)) return false;
+      if (rejoined.roomId !== roomId || rejoined.playerId !== playerId) {
+        throw new Error('Rejoin returned a different membership');
+      }
+      const existing = this.roomSockets.get(roomId)?.get(playerId);
+      if (existing && existing.id !== socket.id) {
+        this.revokeReplacedSocket(existing, roomId, playerId);
+      }
+      const player = this.game.addPlayer(roomId, playerId, nickname);
+      if (!player) throw new Error('Restored room is full');
+      this.game.registerSink(roomId, (event: RoomEvent) => this.dispatchRoomEvent(roomId, event));
+      this.commitJoin(socket, {
+        roomId,
+        playerId,
+        roomCode: roomCode ?? '',
+        generation: attemptGeneration,
+        joinedPlayer: player,
+      });
+      return true;
+    } catch (err) {
+      this.logger.error(
+        'Failed to restore previous room after aborted switch',
+        err instanceof Error ? err.message : String(err),
+      );
+      try {
+        await this.roomService.leaveRoom(roomId, playerId);
+      } catch (rollbackErr) {
+        this.logger.error(
+          'Failed to roll back restored room membership',
+          rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+        );
+      }
+      this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
+      socket.data.roomId = undefined;
+      socket.data.playerId = undefined;
+      socket.data.roomCode = undefined;
+      return false;
+    }
   }
 
   handleDisconnect(socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
     const sessionId = socket.data.sessionId;
+    const membership = roomId && playerId ? this.getMembership(roomId, playerId) : undefined;
 
     if (roomId && playerId) {
       const roomMap = this.roomSockets.get(roomId);
@@ -223,6 +422,7 @@ export class GameSocketGateway
       // mark the live socket offline, cancel its grace timer or delete it from
       // roomSockets. This also gates the shared rate-limit buckets below.
       if (!currentSocket || currentSocket.id !== socket.id) return;
+      if (membership && membership.socketId !== socket.id) return;
       if (pendingTimer && (pendingTimer.roomId !== roomId || pendingTimer.socketId !== socket.id)) {
         return;
       }
@@ -235,6 +435,10 @@ export class GameSocketGateway
     }
 
     if (roomId && playerId) {
+      const generation = membership?.generation;
+      const ownerSocketId = socket.id;
+      // The grace period is owned by this exact socket and generation; a
+      // replacement socket registers a new generation and cancels the timer.
       this.game.setPlayerOnline(roomId, playerId, false);
       const roomMap = this.roomSockets.get(roomId);
       if (roomMap) {
@@ -245,7 +449,6 @@ export class GameSocketGateway
       }
       this.broadcastRoomUpdate(roomId);
       const timer = setTimeout(async () => {
-        const latestMap = this.roomSockets.get(roomId);
         // Persist the departure before freeing the slot. Without this the
         // player keeps leftAt=null in DB, occupies a slot forever and can
         // rejoin a password-protected room without supplying the password.
@@ -257,15 +460,18 @@ export class GameSocketGateway
             err instanceof Error ? err.message : String(err),
           );
         }
-        // Re-check after the await: a reconnect may have installed a new
-        // socket for this playerId while leaveRoom was in flight.
-        const latestMapNow = this.roomSockets.get(roomId);
+        // Re-check after every await. A reconnect may have installed a new
+        // socket (and generation) while leaveRoom was in flight; only the
+        // timer's original owner may complete the eviction.
+        const currentMembership = this.getMembership(roomId, playerId);
         if (
-          latestMapNow?.has(playerId) ||
+          (currentMembership && (currentMembership.socketId !== ownerSocketId ||
+            (generation !== undefined && currentMembership.generation !== generation))) ||
           this.disconnectTimers.get(playerId) !== current
         ) {
           return;
         }
+        this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
         this.game.removePlayer(roomId, playerId);
         this.server.to(roomId).emit('room:playerLeft', playerId);
         this.broadcastRoomUpdate(roomId);
@@ -281,7 +487,7 @@ export class GameSocketGateway
         timer,
         roomId,
         playerId,
-        socketId: socket.id,
+        socketId: ownerSocketId,
       };
       this.disconnectTimers.set(playerId, current);
     }
@@ -340,9 +546,10 @@ export class GameSocketGateway
       // A socket may belong to at most one game room. Persist the old leave
       // before writing the destination row so a rejected leave aborts the
       // switch without touching the destination or old socket state.
+      let previous: Awaited<ReturnType<GameSocketGateway['leaveCurrentRoom']>> = null;
       if (socket.data.roomId && socket.data.roomId !== room.id) {
         try {
-          await this.leaveCurrentRoom(socket);
+          previous = await this.leaveCurrentRoom(socket);
         } catch (err) {
           this.logger.error(
             'Room switch aborted: could not leave previous room',
@@ -353,115 +560,121 @@ export class GameSocketGateway
         }
       }
 
-      const joined = await this.roomService.joinRoom(
-        roomCode,
-        nickname,
-        socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
-        socket.data.identityType === 'user' ? socket.data.userId! : null,
-        typeof data.password === 'string' ? data.password : undefined,
-      );
-
-      // When the same identity reconnects with a new socket, revoke the old
-      // socket rather than leaving two sockets able to act for one player.
-      // The player slot and DB row stay intact; the new socket takes over.
-      const existingSocket = this.roomSockets.get(joined.roomId)?.get(joined.playerId);
-      if (existingSocket && existingSocket.id !== socket.id) {
-        this.revokeReplacedSocket(existingSocket, joined.roomId, joined.playerId);
-      }
-
-      socket.data.playerId = joined.playerId;
-      socket.data.roomId = joined.roomId;
-      socket.data.roomCode = roomCode;
-      // Do not join the socket room until capacity is confirmed: on ROOM_FULL
-      // the socket must not be an active room member.
-      // The timer belongs to this player's reconnect: clear it only after
-      // joinRoom confirms the identity that owns the slot.
-      this.clearDisconnectTimer(joined.roomId, joined.playerId);
-
-      const existingSnapshot = this.game.getSnapshot(joined.roomId);
-      if (!existingSnapshot) {
-        const dbRoom = await this.roomService.getRoomById(joined.roomId);
-        if (dbRoom.status === 'PLAYING') {
-          await this.roomService.resetRoomStatus(joined.roomId);
-          socket.emit('match:cancelled', { reason: 'SERVER_RESTART' });
-        }
-        const activePlayers = dbRoom.players;
-        const hostId =
-          dbRoom.hostPlayerId && activePlayers.some(p => p.id === dbRoom.hostPlayerId)
-            ? dbRoom.hostPlayerId
-            : joined.playerId;
-        if (hostId !== dbRoom.hostPlayerId) {
-          await this.roomService.updateHost(joined.roomId, hostId);
-        }
-        const hostNickname =
-          activePlayers.find(p => p.id === hostId)?.nicknameSnapshot ?? nickname;
-        this.game.initRoom(
-          joined.roomId,
-          hostId,
-          hostNickname,
-          dbRoom.settings as never,
+      // Reserve an attempt generation before awaiting anything else. A newer
+      // join from the same socket supersedes this one, and every await below
+      // is followed by an ownership recheck before any mutation.
+      const generation = this.beginJoinAttempt(socket.id);
+      let joined: { roomId: string; roomCode: string; playerId: string } | null = null;
+      let destinationCommitted = false;
+      try {
+        joined = await this.roomService.joinRoom(
+          roomCode,
+          nickname,
+          socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
+          socket.data.identityType === 'user' ? socket.data.userId! : null,
+          typeof data.password === 'string' ? data.password : undefined,
         );
-        for (const p of activePlayers) {
-          this.game.addPlayer(joined.roomId, p.id, p.nicknameSnapshot);
+        if (!this.ownsJoinAttempt(socket.id, generation)) return;
+
+        // When the same identity reconnects with a new socket, revoke the old
+        // socket rather than leaving two sockets able to act for one player.
+        // The player slot and DB row stay intact; the new socket takes over.
+        const existingSocket = this.roomSockets.get(joined.roomId)?.get(joined.playerId);
+        if (existingSocket && existingSocket.id !== socket.id) {
+          this.revokeReplacedSocket(existingSocket, joined.roomId, joined.playerId);
         }
-      }
-      const joinedPlayer = this.game.addPlayer(joined.roomId, joined.playerId, nickname);
-      if (!joinedPlayer) {
-        // addPlayer returned null because the in-memory room is at capacity.
-        // joinRoom already persisted a DB row (or reactivated a soft-deleted
-        // one), so release that slot before reporting ROOM_FULL; otherwise the
-        // abandoned row keeps the room full forever.
-        try {
-          await this.roomService.leaveRoom(joined.roomId, joined.playerId);
-        } catch (err) {
-          this.logger.error(
-            'Failed to roll back full-room join',
-            err instanceof Error ? err.message : String(err),
+        // If a newer attempt owns this slot, abandon this one through the
+        // shared failure path: its DB row must be released but the newer
+        // socket's state must not be modified.
+        if (!this.canClaimMembership(joined.roomId, joined.playerId, socket.id)) {
+          throw new Error('Room join superseded');
+        }
+        this.claimMembership(joined.roomId, joined.playerId, socket.id);
+
+        if (!this.game.getSnapshot(joined.roomId)) {
+          const dbRoom = await this.roomService.getRoomById(joined.roomId);
+          if (!this.ownsJoinAttempt(socket.id, generation)) throw new Error('Room join superseded');
+          if (dbRoom.status === 'PLAYING') {
+            await this.roomService.resetRoomStatus(joined.roomId);
+            if (!this.ownsJoinAttempt(socket.id, generation)) throw new Error('Room join superseded');
+            socket.emit('match:cancelled', { reason: 'SERVER_RESTART' });
+          }
+          const activePlayers = dbRoom.players;
+          const hostId =
+            dbRoom.hostPlayerId && activePlayers.some(p => p.id === dbRoom.hostPlayerId)
+              ? dbRoom.hostPlayerId
+              : joined.playerId;
+          if (hostId !== dbRoom.hostPlayerId) {
+            await this.roomService.updateHost(joined.roomId, hostId);
+            if (!this.ownsJoinAttempt(socket.id, generation)) throw new Error('Room join superseded');
+          }
+          const hostNickname =
+            activePlayers.find(p => p.id === hostId)?.nicknameSnapshot ?? nickname;
+          this.game.initRoom(
+            joined.roomId,
+            hostId,
+            hostNickname,
+            dbRoom.settings as never,
           );
+          for (const p of activePlayers) {
+            this.game.addPlayer(joined.roomId, p.id, p.nicknameSnapshot);
+          }
         }
-        socket.data.playerId = undefined;
-        socket.data.roomId = undefined;
-        socket.data.roomCode = undefined;
-        socket.emit('error', 'ROOM_FULL', 'Room is full');
-        return;
-      }
-
-      socket.join(joined.roomId);
-      this.game.registerSink(joined.roomId, (event: RoomEvent) => {
-        this.dispatchRoomEvent(joined.roomId, event);
-      });
-
-      let map = this.roomSockets.get(joined.roomId);
-      if (!map) {
-        map = new Map();
-        this.roomSockets.set(joined.roomId, map);
-      }
-      map.set(joined.playerId, socket);
-
-      const snapshot = this.game.getSnapshot(joined.roomId)!;
-      socket.emit('room:snapshot', {
-        ...snapshot,
-        code: room.code,
-        yourPlayerId: joined.playerId,
-      });
-      this.server.to(joined.roomId).emit('room:playerJoined', {
-        id: joined.playerId,
-        nickname,
-        isHost: joinedPlayer.isHost,
-        isReady: joinedPlayer.isReady,
-        isOnline: joinedPlayer.isOnline,
-        score: joinedPlayer.score,
-      });
-      // Other clients need the authoritative snapshot; incremental
-      // room:playerJoined alone can leave stale ready flags on reconnect.
-      // Broadcasts must not carry yourPlayerId, which is per-socket.
-      this.broadcastRoomUpdate(joined.roomId);
-
-      const turn = this.game.getTurnSnapshot(joined.roomId);
-      if (turn) {
-        socket.emit('turn:restore', turn);
-        const word = this.game.getDrawerWord(joined.roomId, joined.playerId);
-        if (word) socket.emit('turn:yourWord', { word });
+        const joinedPlayer = this.game.addPlayer(joined.roomId, joined.playerId, nickname);
+        if (!joinedPlayer) {
+          // addPlayer returned null because the in-memory room is at capacity.
+          // Route through the shared failure path so the persisted row is
+          // released and an old room (if any) is restored.
+          throw new Error('Room is full');
+        }
+        const destinationRoomId = joined.roomId;
+        this.game.registerSink(destinationRoomId, (event: RoomEvent) => {
+          this.dispatchRoomEvent(destinationRoomId, event);
+        });
+        if (!this.commitJoin(socket, {
+          roomId: joined.roomId,
+          roomCode,
+          playerId: joined.playerId,
+          generation,
+          joinedPlayer,
+        })) {
+          // A newer socket owns this slot; release this attempt's own DB row
+          // without touching the newer socket's state.
+          try {
+            await this.roomService.leaveRoom(joined.roomId, joined.playerId);
+          } catch (rollbackErr) {
+            this.logger.error(
+              'Failed to roll back superseded room join',
+              rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+            );
+          }
+          this.endJoinAttempt(socket.id, generation);
+          return;
+        }
+        destinationCommitted = true;
+      } catch (err) {
+        // Any failed await after the DB row was created must release it: no
+        // active RoomPlayer may exist without a registered socket.
+        if (joined && !destinationCommitted) {
+          try {
+            await this.roomService.leaveRoom(joined.roomId, joined.playerId);
+          } catch (rollbackErr) {
+            this.logger.error(
+              'Failed to roll back destination room membership',
+              rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+            );
+          }
+        }
+        if (joined) this.releaseMembershipIfOwner(joined.roomId, joined.playerId, socket.id);
+        // Keep the attempt token alive until restore completes: restore uses it
+        // to prove no newer join has superseded this socket during its awaits.
+        const restored = previous ? await this.restorePreviousRoom(socket, previous, generation) : false;
+        this.endJoinAttempt(socket.id, generation);
+        if (previous && !restored) {
+          socket.emit('error', 'SWITCH_FAILED', 'Could not join room or restore the previous room');
+          return;
+        }
+        throw err;
       }
     } catch (err) {
       const internalMessage = err instanceof Error ? err.message : String(err);
@@ -517,13 +730,15 @@ export class GameSocketGateway
     @ConnectedSocket() socket: AuthedSocket,
     @MessageBody() ready: boolean,
   ) {
-    const roomId = socket.data.roomId;
-    const playerId = socket.data.playerId;
-    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
+    // Validate the payload first: a malformed frame must always get a clear
+    // error, even if it arrives from a socket with stale room data.
     if (typeof ready !== 'boolean') {
       socket.emit('error', 'INVALID_PAYLOAD', 'Invalid ready state');
       return;
     }
+    const roomId = socket.data.roomId;
+    const playerId = socket.data.playerId;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
     this.game.setReady(roomId, playerId, ready);
     this.broadcastRoomUpdate(roomId);
   }
@@ -812,9 +1027,17 @@ export class GameSocketGateway
       socket.emit('error', 'NOT_HOST', 'Only host can update settings');
       return;
     }
-    const ok = await this.game.updateSettings(roomId, playerId, data ?? {});
-    if (!ok) {
-      socket.emit('error', 'SETTINGS_FAILED', 'Cannot update settings during a match');
+    const result = await this.game.updateSettings(roomId, playerId, data ?? {});
+    if (!result.ok) {
+      if (isSettingsUpdateFailure(result, 'MATCH_IN_PROGRESS')) {
+        socket.emit('error', 'SETTINGS_FAILED', 'Cannot update settings during a match');
+      } else {
+        // A persistence failure (or any other internal reason) must not be
+        // reported as a match-in-progress rejection, and DB details must never
+        // reach the client. Log the fixed reason only for server-side diagnosis.
+        this.logger.warn(`Settings update failed for room ${roomId}`, result.reason);
+        socket.emit('error', 'SETTINGS_SAVE_FAILED', 'Could not save settings');
+      }
     }
   }
 
@@ -882,6 +1105,8 @@ export class GameSocketGateway
     this.disconnectTimers.clear();
     this.rateLimits.clear();
     this.roomSockets.clear();
+    this.activeMemberships.clear();
+    this.joinAttempts.clear();
     this.kickedSessions.clear();
   }
 }
