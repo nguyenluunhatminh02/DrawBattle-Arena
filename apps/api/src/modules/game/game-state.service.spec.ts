@@ -1,4 +1,9 @@
-import { GameStateService, RoomEvent } from './game-state.service';
+import {
+  GameStateService,
+  isSettingsUpdateFailure,
+  RoomEvent,
+  SettingsUpdateResult,
+} from './game-state.service';
 
 function makeService(): GameStateService {
   // addPlayer/initRoom are pure in-memory operations and do not use these
@@ -25,6 +30,49 @@ describe('GameStateService.addPlayer', () => {
     expect(reconnected).not.toBeNull();
     expect(reconnected?.id).toBe('guest');
     expect(reconnected?.isOnline).toBe(true);
+  });
+});
+
+describe('GameStateService status generation fencing', () => {
+  const roomId = 'room-generation';
+
+  it('keeps a pending WAITING write stale across a room recreation', async () => {
+    const roomUpdate = jest.fn().mockResolvedValue({});
+    const service = new GameStateService(
+      {} as never,
+      { room: { update: roomUpdate }, match: { create: jest.fn() } } as never,
+      {} as never,
+    );
+    const settings = {
+      mode: 'CLASSIC',
+      maxPlayers: 2,
+      rounds: 1,
+      turnDuration: 60,
+      difficulty: 'MIXED',
+      enableHints: false,
+    } as never;
+    const writeStatus = (status: 'PLAYING' | 'WAITING') =>
+      (service as any).writeRoomStatus(roomId, status) as Promise<void>;
+
+    // Last player leaves: the room is removed and a WAITING write is queued.
+    service.initRoom(roomId, 'host', 'Host', settings);
+    writeStatus('PLAYING');
+    service.removePlayer(roomId, 'host');
+    expect((service as any).rooms.has(roomId)).toBe(false);
+    expect(roomUpdate).not.toHaveBeenCalled();
+
+    // A new lifetime must not reset the generation, otherwise the queued
+    // WAITING write would pass isCurrent() and corrupt the new room's status.
+    service.initRoom(roomId, 'newHost', 'New Host', settings);
+    const freshStart = writeStatus('PLAYING');
+    await freshStart;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(roomUpdate).toHaveBeenCalledTimes(1);
+    expect(roomUpdate).toHaveBeenCalledWith({
+      where: { id: roomId },
+      data: { status: 'PLAYING' },
+    });
   });
 });
 
@@ -391,15 +439,26 @@ describe('GameStateService settings persistence', () => {
     service.registerSink(roomId, event => events.push(event));
   });
 
+  afterEach(() => {
+    const turn = (service as any).rooms.get(roomId)?.match?.turn;
+    if (turn?.timer) clearTimeout(turn.timer);
+    for (const t of turn?.hintTimers ?? []) clearTimeout(t);
+  });
+
   it('does not mutate in-memory settings or emit a snapshot when persistence fails', async () => {
     roomUpdate.mockRejectedValueOnce(new Error('db down'));
     jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
     const before = service.getSnapshot(roomId)?.settings;
 
-    await expect(
-      service.updateSettings(roomId, 'host', { rounds: 3, turnDuration: 90, enableHints: true }),
-    ).resolves.toBe(false);
+    const result = await service.updateSettings(roomId, 'host', {
+      rounds: 3,
+      turnDuration: 90,
+      enableHints: true,
+    });
 
+    expect(result).toEqual({ ok: false, reason: 'SETTINGS_SAVE_FAILED' });
+    expect(isSettingsUpdateFailure(result, 'SETTINGS_SAVE_FAILED')).toBe(true);
+    expect(isSettingsUpdateFailure(result, 'MATCH_IN_PROGRESS')).toBe(false);
     expect(service.getSnapshot(roomId)?.settings).toEqual(before);
     expect(events.some(event => event.type === 'room:snapshot')).toBe(false);
     expect(roomUpdate).toHaveBeenCalledTimes(1);
@@ -419,8 +478,59 @@ describe('GameStateService settings persistence', () => {
     expect(events).toHaveLength(0);
 
     release();
-    await expect(pending).resolves.toBe(true);
+    await expect(pending).resolves.toEqual({ ok: true });
     expect(service.getSnapshot(roomId)?.settings).toMatchObject({ rounds: 3 });
     expect(events.some(event => event.type === 'room:snapshot')).toBe(true);
+  });
+
+  it('rejects a settings write that loses the lock race to startMatch', async () => {
+    // Make this room able to run a real startMatch so the race is exercised
+    // against the actual lock, not a hand-built match object.
+    service.addPlayer(roomId, 'guest', 'Guest');
+    service.setReady(roomId, 'guest', true);
+    Object.assign(service as any, {
+      wordService: {
+        pickRandomWords: jest.fn().mockResolvedValue([
+          { id: 'word-1', canonical: 'mèo', difficulty: 'EASY', category: 'animals' },
+        ]),
+        getWordById: jest.fn().mockResolvedValue({ canonical: 'mèo', synonyms: [] }),
+        incrementUsage: jest.fn().mockResolvedValue(undefined),
+      },
+      featureFlags: { find: jest.fn().mockResolvedValue(null) },
+    });
+
+    // Capture the callback that withLock will run under the room lock. Calling
+    // it directly models a write whose DB call resolves after startMatch has
+    // taken the lock and captured the old settings, exercising the re-check
+    // that a plain queued update cannot reach.
+    let settingsBody!: () => Promise<SettingsUpdateResult>;
+    const withLockSpy = jest
+      .spyOn(service as any, 'withLock')
+      .mockImplementation((...args: unknown[]) => {
+        settingsBody = args[1] as () => Promise<SettingsUpdateResult>;
+        return Promise.resolve({ ok: false, reason: 'MATCH_IN_PROGRESS' }) as never;
+      });
+
+    service.updateSettings(roomId, 'host', { rounds: 3 });
+    withLockSpy.mockRestore();
+
+    await expect(service.startMatch(roomId)).resolves.toBe(true);
+    const before = service.getSnapshot(roomId)?.settings;
+
+    let releaseSettings!: () => void;
+    const settingsGate = new Promise<void>(resolve => {
+      releaseSettings = resolve;
+    });
+    roomUpdate.mockImplementationOnce(() => settingsGate.then(() => ({})));
+
+    const persisted = settingsBody();
+    await Promise.resolve();
+    expect(roomUpdate).toHaveBeenCalledTimes(1);
+    expect(service.getSnapshot(roomId)?.settings).toEqual(before);
+
+    releaseSettings();
+    await expect(persisted).resolves.toEqual({ ok: false, reason: 'MATCH_IN_PROGRESS' });
+    expect(service.getSnapshot(roomId)?.settings).toEqual(before);
+    expect(events.some(event => event.type === 'room:snapshot')).toBe(false);
   });
 });

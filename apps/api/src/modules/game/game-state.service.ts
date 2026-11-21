@@ -119,6 +119,21 @@ export interface RoomEvent {
 
 export type EventSink = (event: RoomEvent) => void;
 
+/** Discriminated settings-update result. Truthy for `ok: true`, falsy otherwise. */
+export type SettingsUpdateResult =
+  | { ok: true; reason?: undefined }
+  | { ok: false; reason: 'ROOM_NOT_FOUND' | 'NOT_HOST' | 'MATCH_IN_PROGRESS' | 'SETTINGS_SAVE_FAILED' };
+
+export type SettingsUpdateFailureReason = Extract<SettingsUpdateResult, { ok: false }>['reason'];
+
+/** Lets callers preserve legacy boolean handling while distinguishing failures. */
+export function isSettingsUpdateFailure(
+  result: SettingsUpdateResult,
+  reason: SettingsUpdateFailureReason,
+): boolean {
+  return result.ok === false && result.reason === reason;
+}
+
 @Injectable()
 export class GameStateService {
   private readonly logger = new Logger(GameStateService.name);
@@ -243,6 +258,14 @@ export class GameStateService {
     hostNickname: string,
     settings: RoomSettings,
   ) {
+    // Keep the fencing generation monotonic across room recreations. A WAITING
+    // write queued while the previous lifetime existed must stay stale after a
+    // new lifetime is initialized, so start the new room strictly above the
+    // highest generation ever issued for this room id.
+    const previousGeneration = Math.max(
+      this.rooms.get(roomId)?.statusGeneration ?? 0,
+      this.retiredStatusGenerations.get(roomId) ?? 0,
+    );
     const players = new Map<string, PlayerState>();
     players.set(hostId, {
       id: hostId,
@@ -265,10 +288,8 @@ export class GameStateService {
       players,
       settings,
       match: null,
+      statusGeneration: previousGeneration,
     });
-    // A recreated room starts a fresh generation; any still-pending write from
-    // the previous room's lifetime is stale and must not be applied.
-    this.retiredStatusGenerations.delete(roomId);
   }
 
   addPlayer(roomId: string, id: string, nickname: string): PlayerInfo | null {
@@ -634,10 +655,15 @@ export class GameStateService {
       payload: { drawerId, timeLimit: wordPickDuration, turnId },
     });
 
-    const autoSelectTimer = setTimeout(async () => {
+    const autoSelectTimer = setTimeout(() => {
       const current = this.rooms.get(roomId)?.match?.turn;
       if (current && current.phase === 'WORD_PICK' && !current.wordId && current.wordOptions[0]) {
-        await this.chooseWord(roomId, drawerId, current.wordOptions[0].id);
+        void this.chooseWord(roomId, drawerId, current.wordOptions[0].id).catch(err => {
+          this.logger.error(
+            `Auto word selection failed for room ${roomId}`,
+            err instanceof Error ? err.message : String(err),
+          );
+        });
       }
     }, wordPickDuration * 1000);
 
@@ -788,41 +814,53 @@ export class GameStateService {
       difficulty?: string;
       category?: string;
     },
-  ): Promise<boolean> {
-    const room = this.rooms.get(roomId);
-    if (!room || room.hostId !== hostId || room.match) return false;
+  ): Promise<SettingsUpdateResult> {
+    return this.withLock(roomId, async () => {
+      const room = this.rooms.get(roomId);
+      if (!room) return { ok: false, reason: 'ROOM_NOT_FOUND' } as const;
+      if (room.hostId !== hostId) return { ok: false, reason: 'NOT_HOST' } as const;
+      if (room.match) return { ok: false, reason: 'MATCH_IN_PROGRESS' } as const;
 
-    const next: RoomSettings = { ...room.settings };
-    if (typeof patch.rounds === 'number') {
-      next.rounds = Math.min(3, Math.max(1, Math.round(patch.rounds)));
-    }
-    if (typeof patch.turnDuration === 'number' && [45, 60, 90].includes(patch.turnDuration)) {
-      next.turnDuration = patch.turnDuration;
-    }
-    if (typeof patch.enableHints === 'boolean') {
-      next.enableHints = patch.enableHints;
-    }
-    if (patch.difficulty && ['EASY', 'MEDIUM', 'HARD', 'MIXED'].includes(patch.difficulty)) {
-      next.difficulty = patch.difficulty as RoomSettings['difficulty'];
-    }
-    if (typeof patch.category === 'string') {
-      next.category = patch.category || undefined;
-    }
-    try {
-      await this.prisma.room.update({
-        where: { id: roomId },
-        data: { settings: next as unknown as Prisma.InputJsonValue },
-      });
-    } catch (err) {
-      this.logger.error(`Failed to persist settings for room ${roomId}`, err instanceof Error ? err.message : String(err));
-      return false;
-    }
+      const next: RoomSettings = { ...room.settings };
+      if (typeof patch.rounds === 'number') {
+        next.rounds = Math.min(3, Math.max(1, Math.round(patch.rounds)));
+      }
+      if (typeof patch.turnDuration === 'number' && [45, 60, 90].includes(patch.turnDuration)) {
+        next.turnDuration = patch.turnDuration;
+      }
+      if (typeof patch.enableHints === 'boolean') {
+        next.enableHints = patch.enableHints;
+      }
+      if (patch.difficulty && ['EASY', 'MEDIUM', 'HARD', 'MIXED'].includes(patch.difficulty)) {
+        next.difficulty = patch.difficulty as RoomSettings['difficulty'];
+      }
+      if (typeof patch.category === 'string') {
+        next.category = patch.category || undefined;
+      }
+      try {
+        await this.prisma.room.update({
+          where: { id: roomId },
+          data: { settings: next as unknown as Prisma.InputJsonValue },
+        });
+      } catch (err) {
+        this.logger.error(`Failed to persist settings for room ${roomId}`, err instanceof Error ? err.message : String(err));
+        return { ok: false, reason: 'SETTINGS_SAVE_FAILED' } as const;
+      }
 
-    // Only commit the in-memory settings after the DB accepted them, so a
-    // failed update cannot make RAM and the database disagree.
-    room.settings = next;
-    this.emit(roomId, { type: 'room:snapshot', payload: this.getSnapshot(roomId) });
-    return true;
+      // A startMatch queued on this room's lock may have begun while the DB call
+      // was in flight. The lock serializes the transition, but the match check
+      // must be repeated before committing so settings cannot change after
+      // startMatch captured them for the new match.
+      if (this.rooms.get(roomId) !== room || room.match) {
+        return { ok: false, reason: 'MATCH_IN_PROGRESS' } as const;
+      }
+
+      // Only commit the in-memory settings after the DB accepted them, so a
+      // failed update cannot make RAM and the database disagree.
+      room.settings = next;
+      this.emit(roomId, { type: 'room:snapshot', payload: this.getSnapshot(roomId) });
+      return { ok: true } as const;
+    });
   }
 
   submitGuess(
