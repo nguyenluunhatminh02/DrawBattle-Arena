@@ -77,6 +77,8 @@ export class GameSocketGateway
   private readonly activeMemberships = new Map<string, ActiveMembership>();
   /** Per-socket generation for in-flight joins (before the player id is known). */
   private readonly joinAttempts = new Map<string, number>();
+  /** Player slot targeted by each in-flight join, for cross-socket fencing. */
+  private readonly joinAttemptTargets = new Map<string, { roomId: string; playerId: string }>();
   private membershipGeneration = 0;
   private readonly disconnectTimers = new Map<string, DisconnectTimer>();
   private readonly kickedSessions = new Map<string, Set<string>>();
@@ -210,12 +212,40 @@ export class GameSocketGateway
     return generation;
   }
 
+  /** Record the player slot an in-flight join is trying to acquire. */
+  private setJoinAttemptTarget(socketId: string, roomId: string, playerId: string): void {
+    this.joinAttemptTargets.set(socketId, { roomId, playerId });
+  }
+
   private ownsJoinAttempt(socketId: string, generation: number): boolean {
     return this.joinAttempts.get(socketId) === generation;
   }
 
   private endJoinAttempt(socketId: string, generation: number): void {
-    if (this.ownsJoinAttempt(socketId, generation)) this.joinAttempts.delete(socketId);
+    if (this.ownsJoinAttempt(socketId, generation)) {
+      this.joinAttempts.delete(socketId);
+      this.joinAttemptTargets.delete(socketId);
+    }
+  }
+
+  /**
+   * Invalidate in-flight joins for the same player slot that belong to other
+   * sockets. Their DB rows may already exist, but once this socket has taken
+   * ownership of the slot they must not claim it or roll back its DB row.
+   * Target identity comes from the DB join result, so a reconnect with the
+   * same identity is fenced even when the old socket holds a stale membership.
+   */
+  private invalidateJoinAttemptsForPlayer(
+    roomId: string,
+    playerId: string,
+    keepSocketId: string,
+  ): void {
+    for (const [socketId, target] of this.joinAttemptTargets) {
+      if (socketId === keepSocketId) continue;
+      if (target.roomId !== roomId || target.playerId !== playerId) continue;
+      this.joinAttempts.delete(socketId);
+      this.joinAttemptTargets.delete(socketId);
+    }
   }
 
   /** A slot may be claimed only if no replacement socket has taken it. */
@@ -575,6 +605,27 @@ export class GameSocketGateway
           typeof data.password === 'string' ? data.password : undefined,
         );
         if (!this.ownsJoinAttempt(socket.id, generation)) return;
+        // The DB join can land while the previous socket's disconnect is still
+        // pending. Its grace timer (or a superseded join's rollback) must never
+        // persist a leave for the slot this attempt just acquired.
+        this.clearDisconnectTimer(joined.roomId, joined.playerId, undefined);
+        this.setJoinAttemptTarget(socket.id, joined.roomId, joined.playerId);
+        // An in-flight join from the socket being replaced can still be inside
+        // its own DB await. Supersede it here so its rollback cannot release
+        // this attempt's freshly written row when it resumes.
+        this.invalidateJoinAttemptsForPlayer(joined.roomId, joined.playerId, socket.id);
+        // A disconnected socket leaves behind its membership token until the
+        // grace timer fires. It must not make this live reconnect look like a
+        // replacement of a socket that is no longer active.
+        if (!this.canClaimMembership(joined.roomId, joined.playerId, socket.id)) {
+          const owner = this.getMembership(joined.roomId, joined.playerId);
+          if (owner) {
+            const ownerSocket = this.roomSockets.get(joined.roomId)?.get(joined.playerId);
+            if (!ownerSocket || (ownerSocket.id !== owner.socketId && ownerSocket.id !== socket.id)) {
+              this.releaseMembershipIfOwner(joined.roomId, joined.playerId, owner.socketId);
+            }
+          }
+        }
 
         // When the same identity reconnects with a new socket, revoke the old
         // socket rather than leaving two sockets able to act for one player.
@@ -1113,6 +1164,7 @@ export class GameSocketGateway
     this.roomSockets.clear();
     this.activeMemberships.clear();
     this.joinAttempts.clear();
+    this.joinAttemptTargets.clear();
     this.kickedSessions.clear();
   }
 }

@@ -270,6 +270,44 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
     expect(game.setReady).not.toHaveBeenCalled();
   });
 
+  it('keeps a reload join when the old socket leaves and its grace timer fires mid-join', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const oldSocket = makeSocket('old-socket', {
+      ...authedData('guest-1'), playerId: 'p1', roomId: 'room-1', roomCode: 'ABC123',
+    });
+    oldSocket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
+    gateway.handleDisconnect(oldSocket);
+    const oldTimer = (gateway as any).disconnectTimers.get('p1');
+    expect(oldTimer).toBeDefined();
+    expect((gateway as any).roomSockets.has('room-1')).toBe(false);
+
+    const newSocket = makeSocket('new-socket', authedData('guest-1'));
+    let resolveJoin!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let joinRequested!: () => void;
+    const requestSeen = new Promise<void>(resolve => { joinRequested = resolve; });
+    roomService.joinRoom.mockImplementation(() => {
+      joinRequested();
+      return new Promise(resolve => { resolveJoin = resolve; });
+    });
+    const joinPromise = gateway.onRoomJoin(newSocket, { roomCode: 'ABC123' });
+    await requestSeen;
+    resolveJoin({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await joinPromise;
+
+    expect((gateway as any).disconnectTimers.has('p1')).toBe(false);
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
+    expect(roomService.leaveRoom).not.toHaveBeenCalled();
+    expect(newSocket.emit).toHaveBeenCalledWith('room:snapshot', expect.objectContaining({ yourPlayerId: 'p1' }));
+
+    // Even if an already queued stale timer callback still runs, it must not
+    // evict the player whose socket is now active.
+    await jest.advanceTimersByTimeAsync(15_000);
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
+    expect(game.removePlayer).not.toHaveBeenCalled();
+  });
+
   it('ignores a stale socket disconnect after a newer socket took over', async () => {
     const { gateway, roomService, game } = makeGateway();
     const oldSocket = makeSocket('old-socket', {

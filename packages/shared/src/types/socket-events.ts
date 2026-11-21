@@ -28,6 +28,8 @@ export interface ServerToClientEvents {
   'room:playerKicked': (data: { playerId: string }) => void;
   'room:kicked': (data: { roomCode?: string }) => void;
   'room:playerMuted': (data: { playerId: string; muted: boolean }) => void;
+  /** Sent to a socket whose player slot was taken over by a newer socket. */
+  'session:replaced': (data: { roomId: string }) => void;
   'match:started': (data: { matchId: string; round: number; totalRounds: number; drawerOrder?: Array<{ id: string; nickname: string }> }) => void;
   'match:teams': (data: TeamsPayload) => void;
   'match:cancelled': (data: { reason: string }) => void;

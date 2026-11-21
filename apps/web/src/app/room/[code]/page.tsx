@@ -146,7 +146,16 @@ export default function RoomPage() {
     };
     socket.on('disconnect', () => {
       setConnected(false);
+      // A network reconnect reuses this socket object. Re-emitting the join is
+      // safe: the gateway revokes the old socket for the same player slot.
       joined = false;
+    });
+    socket.on('session:replaced', () => {
+      // A newer socket (for example after a page reload) took over this
+      // identity. Stop driving the shared socket instance so an unmount or
+      // reconnect from this page cannot revoke the live socket's membership.
+      joined = true;
+      socket.removeAllListeners();
     });
     socket.on('connect', () => {
       setConnected(true);
