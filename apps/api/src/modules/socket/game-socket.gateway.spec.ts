@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import { GameSocketGateway } from './game-socket.gateway';
 
 type SocketData = {
@@ -249,5 +250,43 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
     expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
     expect(game.setPlayerOnline).not.toHaveBeenCalledWith('room-1', 'p1', false);
     expect(roomService.leaveRoom).not.toHaveBeenCalled();
+  });
+});
+
+describe('GameSocketGateway room join error sanitation', () => {
+  it('never forwards internal error details to the socket client', async () => {
+    const { gateway, roomService } = makeGateway();
+    const socket = makeSocket('s1', {
+      identityType: 'guest',
+      sessionId: 'guest-1',
+      nickname: 'Player',
+    });
+    const secret = 'prisma://user:secret123@db.internal:5432/rooms?schema=internal';
+    roomService.joinRoom.mockRejectedValueOnce(new Error(`duplicate key: ${secret}`));
+
+    await gateway.onRoomJoin(socket, { roomCode: 'ABC123' });
+
+    const errorCall = socket.emit.mock.calls.find((call: unknown[]) => call[0] === 'error');
+    expect(errorCall).toBeDefined();
+    expect(errorCall![1]).toBe('JOIN_FAILED');
+    expect(errorCall![2]).toBe('Could not join room');
+    expect(JSON.stringify(errorCall)).not.toContain('password');
+    expect(JSON.stringify(errorCall)).not.toContain('db.internal');
+  });
+
+  it('maps a kicked error to a fixed client-safe code and message', async () => {
+    const { gateway, roomService } = makeGateway();
+    const socket = makeSocket('s1', {
+      identityType: 'guest',
+      sessionId: 'guest-1',
+      nickname: 'Player',
+    });
+    roomService.joinRoom.mockRejectedValueOnce(
+      new ForbiddenException('You were kicked from this room; internal id 42'),
+    );
+
+    await gateway.onRoomJoin(socket, { roomCode: 'ABC123' });
+
+    expect(socket.emit).toHaveBeenCalledWith('error', 'KICKED', 'You were kicked from this room');
   });
 });

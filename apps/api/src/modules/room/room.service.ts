@@ -48,6 +48,43 @@ const DEFAULT_SETTINGS: RoomSettings = {
   mode: 'CLASSIC',
 };
 
+/** Bounded retry budget for PostgreSQL Serializable write conflicts. */
+const SERIALIZABLE_RETRY_ATTEMPTS = 3;
+const SERIALIZABLE_RETRY_BASE_DELAY_MS = 10;
+
+function isSerializableConflict(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === 'P2034') return true;
+  // Prisma maps SQLSTATE 40001 to P2034 in current versions; keep the raw
+  // code as a fallback for older clients and for wrapped driver errors.
+  return (err as { meta?: { code?: unknown } }).meta?.code === '40001';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Retries only retryable Serializable conflicts; validation/domain exceptions
+ * and all other database failures are surfaced immediately. Concurrent joins
+ * re-read room membership and capacity on every attempt.
+ */
+async function withSerializableRetry<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < SERIALIZABLE_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (!isSerializableConflict(err) || attempt === SERIALIZABLE_RETRY_ATTEMPTS - 1) {
+        throw err;
+      }
+      await sleep(SERIALIZABLE_RETRY_BASE_DELAY_MS * (attempt + 1));
+    }
+  }
+  // Unreachable: the loop either returns or throws.
+  throw new Error('Serializable retry budget exhausted');
+}
+
 @Injectable()
 export class RoomService {
   constructor(private readonly prisma: PrismaService) {}
@@ -149,100 +186,102 @@ export class RoomService {
     userId: string | null,
     password?: string,
   ) {
-    return this.prisma.$transaction(async (tx) => {
-      const room = await tx.room.findUnique({
-        where: { code },
-        include: { players: true },
-      });
-      if (!room) throw new NotFoundException('Room not found');
-      if (room.expiresAt && room.expiresAt < new Date()) {
-        throw new BadRequestException('Room expired');
-      }
-
-      // DB is authoritative for kicks: a banned identity must never be able to
-      // create or reactivate a RoomPlayer, including after restarts or when a
-      // different API process handles the join.
-      const identities: Prisma.RoomBanWhereInput[] = [];
-      if (userId) identities.push({ userId });
-      if (guestSessionId) identities.push({ guestSessionId });
-      if (
-        identities.length > 0 &&
-        (await tx.roomBan.findFirst({
-          where: { roomId: room.id, OR: identities },
-          select: { id: true },
-        }))
-      ) {
-        throw new ForbiddenException('You were kicked from this room');
-      }
-
-      const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
-
-      // A reconnecting player is still subject to the room password. Checking
-      // this before the early return prevents password-free rejoin while the
-      // disconnect grace timer has not yet persisted leftAt.
-      if (settings.passwordHash && !(await verifyRoomPassword(password, settings.passwordHash))) {
-        throw new BadRequestException('Invalid password');
-      }
-
-      const activePlayers = room.players.filter(p => !p.leftAt);
-      const existing = room.players.find(
-        p =>
-          (userId && p.userId === userId) ||
-          (guestSessionId && p.guestSessionId === guestSessionId),
-      );
-      // Allow reconnects during active matches - return existing player immediately
-      if (existing && !existing.leftAt) {
-        return {
-          roomId: room.id,
-          roomCode: room.code,
-          playerId: existing.id,
-        };
-      }
-
-      // Only check room status for genuinely new joins
-      if (room.status !== 'WAITING') {
-        throw new BadRequestException('Game already in progress');
-      }
-
-      if (activePlayers.length >= settings.maxPlayers) {
-        throw new BadRequestException('Room is full');
-      }
-
-      if (existing && existing.leftAt) {
-        const reactivated = await tx.roomPlayer.update({
-          where: { id: existing.id },
-          data: { leftAt: null, nicknameSnapshot: nickname },
+    return withSerializableRetry(() =>
+      this.prisma.$transaction(async (tx) => {
+        const room = await tx.room.findUnique({
+          where: { code },
+          include: { players: true },
         });
+        if (!room) throw new NotFoundException('Room not found');
+        if (room.expiresAt && room.expiresAt < new Date()) {
+          throw new BadRequestException('Room expired');
+        }
+
+        // DB is authoritative for kicks: a banned identity must never be able to
+        // create or reactivate a RoomPlayer, including after restarts or when a
+        // different API process handles the join.
+        const identities: Prisma.RoomBanWhereInput[] = [];
+        if (userId) identities.push({ userId });
+        if (guestSessionId) identities.push({ guestSessionId });
+        if (
+          identities.length > 0 &&
+          (await tx.roomBan.findFirst({
+            where: { roomId: room.id, OR: identities },
+            select: { id: true },
+          }))
+        ) {
+          throw new ForbiddenException('You were kicked from this room');
+        }
+
+        const settings = room.settings as unknown as RoomSettings & { passwordHash?: string };
+
+        // A reconnecting player is still subject to the room password. Checking
+        // this before the early return prevents password-free rejoin while the
+        // disconnect grace timer has not yet persisted leftAt.
+        if (settings.passwordHash && !(await verifyRoomPassword(password, settings.passwordHash))) {
+          throw new BadRequestException('Invalid password');
+        }
+
+        const activePlayers = room.players.filter(p => !p.leftAt);
+        const existing = room.players.find(
+          p =>
+            (userId && p.userId === userId) ||
+            (guestSessionId && p.guestSessionId === guestSessionId),
+        );
+        // Allow reconnects during active matches - return existing player immediately
+        if (existing && !existing.leftAt) {
+          return {
+            roomId: room.id,
+            roomCode: room.code,
+            playerId: existing.id,
+          };
+        }
+
+        // Only check room status for genuinely new joins
+        if (room.status !== 'WAITING') {
+          throw new BadRequestException('Game already in progress');
+        }
+
+        if (activePlayers.length >= settings.maxPlayers) {
+          throw new BadRequestException('Room is full');
+        }
+
+        if (existing && existing.leftAt) {
+          const reactivated = await tx.roomPlayer.update({
+            where: { id: existing.id },
+            data: { leftAt: null, nicknameSnapshot: nickname },
+          });
+          return {
+            roomId: room.id,
+            roomCode: room.code,
+            playerId: reactivated.id,
+          };
+        }
+
+        if (!nickname || nickname.trim().length === 0) {
+          throw new BadRequestException('Nickname is required');
+        }
+        const player = await tx.roomPlayer.create({
+          data: {
+            roomId: room.id,
+            userId,
+            guestSessionId,
+            nicknameSnapshot: nickname,
+            role: 'PLAYER',
+          },
+        });
+
         return {
           roomId: room.id,
           roomCode: room.code,
-          playerId: reactivated.id,
+          playerId: player.id,
         };
-      }
-
-      if (!nickname || nickname.trim().length === 0) {
-        throw new BadRequestException('Nickname is required');
-      }
-      const player = await tx.roomPlayer.create({
-        data: {
-          roomId: room.id,
-          userId,
-          guestSessionId,
-          nicknameSnapshot: nickname,
-          role: 'PLAYER',
-        },
-      });
-
-      return {
-        roomId: room.id,
-        roomCode: room.code,
-        playerId: player.id,
-      };
-    }, {
-      isolationLevel: 'Serializable',
-      maxWait: 5000,
-      timeout: 10000,
-    });
+      }, {
+        isolationLevel: 'Serializable',
+        maxWait: 5000,
+        timeout: 10000,
+      }),
+    );
   }
 
   async getRoomById(id: string) {

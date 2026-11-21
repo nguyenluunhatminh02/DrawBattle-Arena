@@ -8,7 +8,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import type { Server, Socket } from 'socket.io';
 import { AuthService } from '../auth/auth.service';
 import { RoomService } from '../room/room.service';
@@ -453,14 +453,37 @@ export class GameSocketGateway
         if (word) socket.emit('turn:yourWord', { word });
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Join failed';
-      const lower = message.toLowerCase();
-      let code = 'JOIN_FAILED';
-      if (lower.includes('password')) code = 'INVALID_PASSWORD';
-      else if (lower.includes('full')) code = 'ROOM_FULL';
-      else if (lower.includes('progress')) code = 'GAME_IN_PROGRESS';
-      else if (lower.includes('expired')) code = 'ROOM_EXPIRED';
-      else if (lower.includes('not found')) code = 'ROOM_NOT_FOUND';
+      const internalMessage = err instanceof Error ? err.message : String(err);
+      const lower = internalMessage.toLowerCase();
+      // Map only the known join-domain failures to fixed, client-safe codes and
+      // messages. Never forward an internal err.message to socket clients: it
+      // can contain SQL/Prisma details, credentials or other host internals.
+      let code: string;
+      let message: string;
+      if (err instanceof ForbiddenException || lower.includes('kicked')) {
+        code = 'KICKED';
+        message = 'You were kicked from this room';
+      } else if (err instanceof NotFoundException || lower.includes('not found')) {
+        code = 'ROOM_NOT_FOUND';
+        message = 'Room not found';
+      } else if (lower.includes('password')) {
+        code = 'INVALID_PASSWORD';
+        message = 'Invalid password';
+      } else if (lower.includes('full')) {
+        code = 'ROOM_FULL';
+        message = 'Room is full';
+      } else if (lower.includes('progress')) {
+        code = 'GAME_IN_PROGRESS';
+        message = 'Game already in progress';
+      } else if (lower.includes('expired')) {
+        code = 'ROOM_EXPIRED';
+        message = 'Room expired';
+      } else {
+        code = 'JOIN_FAILED';
+        message = 'Could not join room';
+      }
+      // Log the raw error server-side for diagnosis; clients get codes only.
+      this.logger.warn(`Room join failed (${code})`, internalMessage);
       socket.emit('error', code, message);
     }
   }

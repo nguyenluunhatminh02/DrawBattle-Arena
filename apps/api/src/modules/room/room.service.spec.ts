@@ -95,4 +95,46 @@ describe('RoomService.joinRoom', () => {
       data: { leftAt: null, nicknameSnapshot: 'Alice' },
     });
   });
+
+  it('retries a Serializable P2034 conflict and succeeds on the next attempt', async () => {
+    const openRoom = room({ settings: { maxPlayers: 8 } });
+    const { tx } = makeService(openRoom);
+    const conflict = Object.assign(new Error('write conflict'), { code: 'P2034' });
+    const transactional = jest
+      .fn()
+      .mockRejectedValueOnce(conflict)
+      .mockImplementation(fn => fn(tx));
+    tx.roomPlayer.create.mockResolvedValue({ id: 'player-new' });
+    const service = new RoomService({ $transaction: transactional } as any);
+
+    await expect(
+      service.joinRoom('ABC123', 'New', 'session-new', null),
+    ).resolves.toEqual({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'player-new' });
+
+    expect(transactional).toHaveBeenCalledTimes(2);
+    expect(tx.roomPlayer.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds retries and rethrows after repeated P2034 conflicts', async () => {
+    const conflict = Object.assign(new Error('write conflict'), {
+      code: 'P2034',
+    });
+    const transactional = jest.fn().mockRejectedValue(conflict);
+    const service = new RoomService({ $transaction: transactional } as any);
+
+    await expect(
+      service.joinRoom('ABC123', 'New', 'session-new', null),
+    ).rejects.toMatchObject({ code: 'P2034' });
+    expect(transactional).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry non-conflict errors', async () => {
+    const transactional = jest.fn().mockRejectedValue(new Error('connection lost'));
+    const service = new RoomService({ $transaction: transactional } as any);
+
+    await expect(
+      service.joinRoom('ABC123', 'New', 'session-new', null),
+    ).rejects.toThrow('connection lost');
+    expect(transactional).toHaveBeenCalledTimes(1);
+  });
 });
