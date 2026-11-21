@@ -613,3 +613,224 @@ describe('GameSocketGateway room join error sanitation', () => {
     expect(socket.emit).toHaveBeenCalledWith('error', 'KICKED', 'You were kicked from this room');
   });
 });
+
+describe('GameSocketGateway join race conditions', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  function authedData(sessionId: string) {
+    return {
+      identityType: 'guest' as const,
+      sessionId,
+      nickname: 'Player',
+    };
+  }
+
+  it('invalidates an older in-flight join when a newer join for the same slot commits first', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket1 = makeSocket('s1', authedData('guest-1'));
+    const socket2 = makeSocket('s2', authedData('guest-1'));
+
+    let resolveJoin1!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let join1Requested!: () => void;
+    const join1Seen = new Promise<void>(resolve => { join1Requested = resolve; });
+    roomService.joinRoom.mockImplementationOnce(() => {
+      join1Requested();
+      return new Promise(resolve => { resolveJoin1 = resolve; });
+    });
+
+    const join1Promise = gateway.onRoomJoin(socket1, { roomCode: 'ABC123' });
+    await join1Seen;
+
+    // Socket2 starts a new join for the same slot while socket1 is still pending.
+    let resolveJoin2!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let join2Requested!: () => void;
+    const join2Seen = new Promise<void>(resolve => { join2Requested = resolve; });
+    roomService.joinRoom.mockImplementationOnce(() => {
+      join2Requested();
+      return new Promise(resolve => { resolveJoin2 = resolve; });
+    });
+
+    const join2Promise = gateway.onRoomJoin(socket2, { roomCode: 'ABC123' });
+    await join2Seen;
+
+    // Socket2 resolves first and commits.
+    resolveJoin2({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await join2Promise;
+
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(socket2);
+
+    // Socket1 resolves later but must not commit or roll back socket2's row.
+    resolveJoin1({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await join1Promise;
+
+    // Socket2 remains the active member.
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(socket2);
+    expect(roomService.leaveRoom).not.toHaveBeenCalled();
+    expect(game.removePlayer).not.toHaveBeenCalled();
+  });
+
+  it('aborts a join when the socket disconnects before the DB await resolves', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+
+    let resolveJoin!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let joinRequested!: () => void;
+    const joinSeen = new Promise<void>(resolve => { joinRequested = resolve; });
+    roomService.joinRoom.mockImplementation(() => {
+      joinRequested();
+      return new Promise(resolve => { resolveJoin = resolve; });
+    });
+
+    const joinPromise = gateway.onRoomJoin(socket, { roomCode: 'ABC123' });
+    await joinSeen;
+
+    // Socket disconnects while join is pending.
+    gateway.handleDisconnect(socket);
+
+    resolveJoin({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await joinPromise;
+
+    // The join must not commit or install the socket. Its own DB row is rolled
+    // back so no active row is left without a socket.
+    expect((gateway as any).roomSockets.has('room-1')).toBe(false);
+    expect(roomService.leaveRoom).toHaveBeenCalledWith('room-1', 'p1');
+    expect(game.addPlayer).not.toHaveBeenCalled();
+  });
+
+  it('does not evict a newer socket when a disconnect timer fires while its join commits', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const oldSocket = makeSocket('old-socket', {
+      ...authedData('guest-1'), playerId: 'p1', roomId: 'room-1', roomCode: 'ABC123',
+    });
+    oldSocket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
+
+    // Old socket disconnects, starting a grace timer.
+    gateway.handleDisconnect(oldSocket);
+    const timer = (gateway as any).disconnectTimers.get('p1');
+    expect(timer).toBeDefined();
+
+    // New socket starts a join while the timer is pending.
+    const newSocket = makeSocket('new-socket', authedData('guest-1'));
+    let resolveJoin!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let joinRequested!: () => void;
+    const joinSeen = new Promise<void>(resolve => { joinRequested = resolve; });
+    roomService.joinRoom.mockImplementation(() => {
+      joinRequested();
+      return new Promise(resolve => { resolveJoin = resolve; });
+    });
+
+    const joinPromise = gateway.onRoomJoin(newSocket, { roomCode: 'ABC123' });
+    await joinSeen;
+
+    // Timer fires while join is still pending, calling leaveRoom.
+    let resolveLeave!: (value: undefined) => void;
+    roomService.leaveRoom.mockImplementationOnce(() => {
+      return new Promise<undefined>(resolve => { resolveLeave = resolve; });
+    });
+    await jest.advanceTimersByTimeAsync(15_000);
+
+    // Join resolves and commits before the timer's leaveRoom completes.
+    resolveJoin({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await joinPromise;
+
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
+
+    // Timer's leaveRoom completes but must not evict the new socket.
+    resolveLeave(undefined);
+    await Promise.resolve();
+
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
+    expect(game.removePlayer).not.toHaveBeenCalled();
+  });
+
+  it('does not roll back the winning socket row from an invalidated older attempt', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket1 = makeSocket('s1', authedData('guest-1'));
+    const socket2 = makeSocket('s2', authedData('guest-1'));
+
+    // Both joins target the same identity/slot, so the older attempt must be
+    // invalidated as soon as the newer one registers its target.
+    let resolveJoin1!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let join1Requested!: () => void;
+    const join1Seen = new Promise<void>(resolve => { join1Requested = resolve; });
+    roomService.joinRoom.mockImplementationOnce(() => {
+      join1Requested();
+      return new Promise(resolve => { resolveJoin1 = resolve; });
+    });
+    const join1Promise = gateway.onRoomJoin(socket1, { roomCode: 'ABC123' });
+    await join1Seen;
+
+    let resolveJoin2!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let join2Requested!: () => void;
+    const join2Seen = new Promise<void>(resolve => { join2Requested = resolve; });
+    roomService.joinRoom.mockImplementationOnce(() => {
+      join2Requested();
+      return new Promise(resolve => { resolveJoin2 = resolve; });
+    });
+    const join2Promise = gateway.onRoomJoin(socket2, { roomCode: 'ABC123' });
+    await join2Seen;
+
+    // The newer join commits first.
+    resolveJoin2({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await join2Promise;
+
+    // The older join resolves last and must neither commit nor roll back the
+    // newer socket's DB row.
+    resolveJoin1({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await join1Promise;
+
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(socket2);
+    expect(roomService.leaveRoom).not.toHaveBeenCalled();
+    expect(game.removePlayer).not.toHaveBeenCalled();
+    expect(socket1.data.roomId).toBeUndefined();
+    expect(socket2.data.roomId).toBe('room-1');
+  });
+
+  it('rolls back an invalidated attempt own row when no newer socket owns that slot', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+
+    let resolveJoin!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let joinRequested!: () => void;
+    const joinSeen = new Promise<void>(resolve => { joinRequested = resolve; });
+    roomService.joinRoom.mockImplementationOnce(() => {
+      joinRequested();
+      return new Promise(resolve => { resolveJoin = resolve; });
+    });
+
+    const joinPromise = gateway.onRoomJoin(socket, { roomCode: 'ABC123' });
+    await joinSeen;
+
+    // Invalidate this attempt while its DB join is in flight. It still owns
+    // the row that is about to be created and must release that row itself.
+    const generation = [...(gateway as any).joinAttemptStates.keys()][0];
+    (gateway as any).invalidateJoinAttempt(generation);
+
+    resolveJoin({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await joinPromise;
+
+    expect(roomService.leaveRoom).toHaveBeenCalledWith('room-1', 'p1');
+    expect(game.addPlayer).not.toHaveBeenCalledWith('room-1', 'p1', 'Player');
+    expect((gateway as any).roomSockets.has('room-1')).toBe(false);
+    expect((gateway as any).joinAttemptStates.size).toBe(0);
+    expect((gateway as any).joinAttemptTargets.size).toBe(0);
+  });
+
+  it('cleans up stale join targets after an attempt ends', async () => {
+    const { gateway, roomService } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+
+    await gateway.onRoomJoin(socket, { roomCode: 'ABC123' });
+
+    // After the join completes, no stale targets should remain.
+    expect((gateway as any).joinAttemptTargets.size).toBe(0);
+    expect((gateway as any).joinAttemptStates.size).toBe(0);
+    expect((gateway as any).joinAttempts.size).toBe(0);
+  });
+});

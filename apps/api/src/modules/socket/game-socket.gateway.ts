@@ -27,6 +27,7 @@ interface DisconnectTimer {
   roomId: string;
   playerId: string;
   socketId: string;
+  generation?: number;
 }
 
 /**
@@ -45,6 +46,30 @@ interface JoinBuild {
   playerId: string;
   generation: number;
   joinedPlayer: NonNullable<ReturnType<GameStateService['addPlayer']>>;
+}
+
+/**
+ * Per-attempt ownership. Each join has its own token so an older attempt can
+ * always end (and roll back only) itself, even after a newer attempt exists.
+ */
+interface JoinAttempt {
+  generation: number;
+  socketId: string;
+  roomId: string;
+  /** Verified identity from the socket session, used before playerId is known. */
+  identityKey?: string;
+  playerId?: string;
+  invalidated: boolean;
+  disconnected: boolean;
+  dbRowOwned: boolean;
+}
+
+interface JoinTarget {
+  generation: number;
+  socketId: string;
+  roomId: string;
+  playerId?: string;
+  identityKey?: string;
 }
 
 interface AuthedSocket extends Socket {
@@ -75,10 +100,12 @@ export class GameSocketGateway
   private readonly roomSockets = new Map<string, Map<string, AuthedSocket>>();
   /** Ownership tokens for committed player slots, keyed by room + player. */
   private readonly activeMemberships = new Map<string, ActiveMembership>();
-  /** Per-socket generation for in-flight joins (before the player id is known). */
+  /** Newest in-flight join token per socket. */
   private readonly joinAttempts = new Map<string, number>();
-  /** Player slot targeted by each in-flight join, for cross-socket fencing. */
-  private readonly joinAttemptTargets = new Map<string, { roomId: string; playerId: string }>();
+  /** All in-flight attempts, keyed by their own token. */
+  private readonly joinAttemptStates = new Map<number, JoinAttempt>();
+  /** Per-attempt targets keyed by token, so overlapping joins stay visible. */
+  private readonly joinAttemptTargets = new Map<number, JoinTarget>();
   private membershipGeneration = 0;
   private readonly disconnectTimers = new Map<string, DisconnectTimer>();
   private readonly kickedSessions = new Map<string, Set<string>>();
@@ -151,18 +178,24 @@ export class GameSocketGateway
    * A reconnect may install a new timer for the same player while an older
    * socket is still finishing its disconnect. Only the matching room/player/
    * socket identity may clear a timer; otherwise a stale duplicate socket
-   * would cancel the live socket's grace period.
+   * would cancel the live socket's grace period. A generation is checked too
+   * when the caller knows the membership generation it intends to cancel.
    */
   private clearDisconnectTimer(
     roomId: string,
     playerId: string,
     socketId?: string,
+    generation?: number,
   ): boolean {
     const current = this.disconnectTimers.get(playerId);
     if (!current || current.roomId !== roomId || current.playerId !== playerId) {
       return false;
     }
     if (socketId !== undefined && current.socketId !== socketId) {
+      return false;
+    }
+    if (generation !== undefined && current.generation !== undefined &&
+        current.generation !== generation) {
       return false;
     }
     clearTimeout(current.timer);
@@ -205,46 +238,116 @@ export class GameSocketGateway
     return generation;
   }
 
-  /** Begin an in-flight join. A newer join on the same socket supersedes it. */
-  private beginJoinAttempt(socketId: string): number {
+  /** Reserve a token for an in-flight join before any DB await. */
+  private beginJoinAttempt(socket: AuthedSocket, roomId: string): number {
     const generation = ++this.membershipGeneration;
-    this.joinAttempts.set(socketId, generation);
+    const identityKey = socket.data.sessionId || socket.data.userId;
+    this.joinAttempts.set(socket.id, generation);
+    this.joinAttemptStates.set(generation, {
+      generation,
+      socketId: socket.id,
+      roomId,
+      identityKey,
+      invalidated: false,
+      disconnected: socket.disconnected === true,
+      dbRowOwned: false,
+    });
+    // Register the target before the DB await using only verified identity.
+    // A competing join can invalidate it even before the player id is known.
+    this.joinAttemptTargets.set(generation, {
+      generation,
+      socketId: socket.id,
+      roomId,
+      identityKey,
+    });
+    // A newer join from the same verified identity supersedes older in-flight
+    // attempts for that identity immediately - before either DB await resolves.
+    if (identityKey) {
+      for (const target of this.joinAttemptTargets.values()) {
+        if (target.generation === generation || target.roomId !== roomId ||
+            target.identityKey !== identityKey) {
+          continue;
+        }
+        this.invalidateJoinAttempt(target.generation);
+      }
+    }
     return generation;
   }
 
-  /** Record the player slot an in-flight join is trying to acquire. */
-  private setJoinAttemptTarget(socketId: string, roomId: string, playerId: string): void {
-    this.joinAttemptTargets.set(socketId, { roomId, playerId });
+  /** Refine an attempt's target with the player slot from the verified lookup. */
+  private setJoinAttemptTarget(
+    generation: number,
+    roomId: string,
+    playerId: string,
+  ): void {
+    const attempt = this.joinAttemptStates.get(generation);
+    if (!attempt) return;
+    attempt.playerId = playerId;
+    this.joinAttemptTargets.set(generation, {
+      generation,
+      socketId: attempt.socketId,
+      roomId,
+      playerId,
+      identityKey: attempt.identityKey,
+    });
+  }
+
+  private getJoinAttempt(generation: number): JoinAttempt | undefined {
+    return this.joinAttemptStates.get(generation);
   }
 
   private ownsJoinAttempt(socketId: string, generation: number): boolean {
-    return this.joinAttempts.get(socketId) === generation;
+    const attempt = this.joinAttemptStates.get(generation);
+    return !!attempt && attempt.socketId === socketId && !attempt.invalidated &&
+      this.joinAttempts.get(socketId) === generation;
   }
 
-  private endJoinAttempt(socketId: string, generation: number): void {
-    if (this.ownsJoinAttempt(socketId, generation)) {
-      this.joinAttempts.delete(socketId);
-      this.joinAttemptTargets.delete(socketId);
+  /** Invalidate one attempt without affecting a newer attempt on the same socket. */
+  private invalidateJoinAttempt(generation: number): void {
+    const attempt = this.joinAttemptStates.get(generation);
+    if (!attempt) return;
+    attempt.invalidated = true;
+    if (this.joinAttempts.get(attempt.socketId) === generation) {
+      this.joinAttempts.delete(attempt.socketId);
     }
   }
 
+  /** End only this attempt's token; never delete a newer attempt's target. */
+  private endJoinAttempt(socketId: string, generation: number): void {
+    const attempt = this.joinAttemptStates.get(generation);
+    if (!attempt || attempt.socketId !== socketId) return;
+    if (this.joinAttempts.get(socketId) === generation) {
+      this.joinAttempts.delete(socketId);
+    }
+    this.joinAttemptTargets.delete(generation);
+    this.joinAttemptStates.delete(generation);
+  }
+
   /**
-   * Invalidate in-flight joins for the same player slot that belong to other
-   * sockets. Their DB rows may already exist, but once this socket has taken
-   * ownership of the slot they must not claim it or roll back its DB row.
-   * Target identity comes from the DB join result, so a reconnect with the
-   * same identity is fenced even when the old socket holds a stale membership.
+   * Invalidate in-flight joins for the same room/player slot or verified session
+   * on other sockets. Targets are registered before the DB await, so an older
+   * join resolving later is invisible to commit and cannot revoke this socket.
    */
   private invalidateJoinAttemptsForPlayer(
     roomId: string,
     playerId: string,
     keepSocketId: string,
+    keepGeneration: number,
   ): void {
-    for (const [socketId, target] of this.joinAttemptTargets) {
-      if (socketId === keepSocketId) continue;
-      if (target.roomId !== roomId || target.playerId !== playerId) continue;
-      this.joinAttempts.delete(socketId);
-      this.joinAttemptTargets.delete(socketId);
+    // The verified session identity determines the player slot: joinRoom maps
+    // one identity to one row per room, so matching room + identity is enough
+    // even before a player id is returned by the DB.
+    const ownerSocket = this.roomSockets.get(roomId)?.get(playerId);
+    for (const target of this.joinAttemptTargets.values()) {
+      if (target.socketId === keepSocketId || target.roomId !== roomId) continue;
+      const sameIdentity = !!target.identityKey && (
+        target.identityKey === ownerSocket?.data.sessionId ||
+        target.identityKey === ownerSocket?.data.userId ||
+        target.identityKey === this.joinAttemptStates.get(keepGeneration)?.identityKey
+      );
+      if (target.playerId === playerId || sameIdentity) {
+        this.invalidateJoinAttempt(target.generation);
+      }
     }
   }
 
@@ -270,8 +373,11 @@ export class GameSocketGateway
     const { roomId, playerId, roomCode, generation, joinedPlayer } = build;
     // Another socket may have claimed this player slot during an await.
     if (!this.canClaimMembership(roomId, playerId, socket.id)) return false;
+    if (!this.ownsJoinAttempt(socket.id, generation)) return false;
+    if (socket.disconnected) return false;
     this.claimMembership(roomId, playerId, socket.id);
-    this.endJoinAttempt(socket.id, generation);
+    // Only cancel the grace timer owned by this socket; a timer for a
+    // different socket must keep its period.
     this.clearDisconnectTimer(roomId, playerId, socket.id);
     socket.data.playerId = playerId;
     socket.data.roomId = roomId;
@@ -303,6 +409,8 @@ export class GameSocketGateway
       const word = this.game.getDrawerWord(roomId, playerId);
       if (word) socket.emit('turn:yourWord', { word });
     }
+    const attempt = this.getJoinAttempt(generation);
+    if (attempt) attempt.dbRowOwned = false;
     return true;
   }
 
@@ -314,8 +422,9 @@ export class GameSocketGateway
    * evicting the replacement.
    */
   private revokeReplacedSocket(oldSocket: AuthedSocket, roomId: string, playerId: string): void {
+    const membership = this.getMembership(roomId, playerId);
     this.releaseMembershipIfOwner(roomId, playerId, oldSocket.id);
-    this.clearDisconnectTimer(roomId, playerId, oldSocket.id);
+    this.clearDisconnectTimer(roomId, playerId, oldSocket.id, membership?.generation);
     const roomMap = this.roomSockets.get(roomId);
     if (roomMap?.get(playerId)?.id === oldSocket.id) {
       roomMap.delete(playerId);
@@ -344,6 +453,7 @@ export class GameSocketGateway
     if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return null;
     const ownerSocketId = socket.id;
     const roomCode = socket.data.roomCode;
+    const membershipGeneration = this.getMembership(roomId, playerId)?.generation;
 
     // Persist the departure before releasing in-memory state so a rejected
     // write aborts the switch and leaves the old membership intact.
@@ -355,7 +465,7 @@ export class GameSocketGateway
     const currentMembership = this.getMembership(roomId, playerId);
     if (currentMembership && currentMembership.socketId !== ownerSocketId) return null;
     this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
-    this.clearDisconnectTimer(roomId, playerId, socket.id);
+    this.clearDisconnectTimer(roomId, playerId, socket.id, membershipGeneration);
     this.game.removePlayer(roomId, playerId);
     const roomMap = this.roomSockets.get(roomId);
     if (roomMap?.get(playerId)?.id === socket.id) {
@@ -385,6 +495,7 @@ export class GameSocketGateway
   ): Promise<boolean> {
     const { roomId, playerId, roomCode, socketId } = previous;
     if (!this.ownsJoinAttempt(socket.id, attemptGeneration)) return false;
+    if (socket.disconnected) return false;
     if (this.getMembership(roomId, playerId) && this.getMembership(roomId, playerId)!.socketId !== socketId) {
       return false;
     }
@@ -398,6 +509,7 @@ export class GameSocketGateway
         socket.data.identityType === 'user' ? socket.data.userId! : null,
       );
       if (!this.ownsJoinAttempt(socket.id, attemptGeneration)) return false;
+      if (socket.disconnected) return false;
       if (rejoined.roomId !== roomId || rejoined.playerId !== playerId) {
         throw new Error('Rejoin returned a different membership');
       }
@@ -421,15 +533,19 @@ export class GameSocketGateway
         'Failed to restore previous room after aborted switch',
         err instanceof Error ? err.message : String(err),
       );
-      try {
-        await this.roomService.leaveRoom(roomId, playerId);
-      } catch (rollbackErr) {
-        this.logger.error(
-          'Failed to roll back restored room membership',
-          rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-        );
+      // Roll back only a row this attempt still owns. A newer attempt may have
+      // restored or replaced this slot while the rejoin was in flight.
+      if (this.getJoinAttempt(attemptGeneration)) {
+        try {
+          await this.roomService.leaveRoom(roomId, playerId);
+        } catch (rollbackErr) {
+          this.logger.error(
+            'Failed to roll back restored room membership',
+            rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          );
+        }
       }
-      this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
+      this.releaseMembershipIfOwner(roomId, playerId, socket.id);
       socket.data.roomId = undefined;
       socket.data.playerId = undefined;
       socket.data.roomCode = undefined;
@@ -442,6 +558,19 @@ export class GameSocketGateway
     const playerId = socket.data.playerId;
     const sessionId = socket.data.sessionId;
     const membership = roomId && playerId ? this.getMembership(roomId, playerId) : undefined;
+
+    // A socket that disconnects while its join is in flight must abort that
+    // join. The DB row is rolled back by the join's own failure path, which
+    // rechecks this flag after every await.
+    for (const attempt of this.joinAttemptStates.values()) {
+      if (attempt.socketId !== socket.id) continue;
+      if (roomId && playerId && attempt.playerId &&
+          (attempt.roomId !== roomId || attempt.playerId !== playerId)) {
+        continue;
+      }
+      attempt.disconnected = true;
+      this.invalidateJoinAttempt(attempt.generation);
+    }
 
     if (roomId && playerId) {
       const roomMap = this.roomSockets.get(roomId);
@@ -518,6 +647,7 @@ export class GameSocketGateway
         roomId,
         playerId,
         socketId: ownerSocketId,
+        generation,
       };
       this.disconnectTimers.set(playerId, current);
     }
@@ -590,10 +720,13 @@ export class GameSocketGateway
         }
       }
 
-      // Reserve an attempt generation before awaiting anything else. A newer
-      // join from the same socket supersedes this one, and every await below
-      // is followed by an ownership recheck before any mutation.
-      const generation = this.beginJoinAttempt(socket.id);
+      // Reserve a token before the DB await. The player slot is registered
+      // right away when it is already known from this socket or the room.
+      const generation = this.beginJoinAttempt(socket, room.id);
+      const knownPlayerId = socket.data.roomId === room.id ? socket.data.playerId : undefined;
+      if (knownPlayerId) {
+        this.setJoinAttemptTarget(generation, room.id, knownPlayerId);
+      }
       let joined: { roomId: string; roomCode: string; playerId: string } | null = null;
       let destinationCommitted = false;
       try {
@@ -604,16 +737,27 @@ export class GameSocketGateway
           socket.data.identityType === 'user' ? socket.data.userId! : null,
           typeof data.password === 'string' ? data.password : undefined,
         );
-        if (!this.ownsJoinAttempt(socket.id, generation)) return;
+        const attempt = this.getJoinAttempt(generation);
+        // The DB row belongs to this attempt even when it was invalidated while
+        // the join was in flight. Record ownership first so the failure path can
+        // release only this row without touching a newer socket's membership.
+        if (attempt) attempt.dbRowOwned = true;
+        // An invalidated attempt (superseded join, or a disconnect while the
+        // DB call was pending) must not commit or affect any newer socket.
+        if (!attempt || attempt.invalidated || attempt.disconnected ||
+            !this.ownsJoinAttempt(socket.id, generation) || socket.disconnected) {
+          throw new Error('Room join superseded');
+        }
         // The DB join can land while the previous socket's disconnect is still
         // pending. Its grace timer (or a superseded join's rollback) must never
         // persist a leave for the slot this attempt just acquired.
-        this.clearDisconnectTimer(joined.roomId, joined.playerId, undefined);
-        this.setJoinAttemptTarget(socket.id, joined.roomId, joined.playerId);
+        this.clearDisconnectTimer(joined.roomId, joined.playerId);
+        this.setJoinAttemptTarget(generation, joined.roomId, joined.playerId);
         // An in-flight join from the socket being replaced can still be inside
         // its own DB await. Supersede it here so its rollback cannot release
         // this attempt's freshly written row when it resumes.
-        this.invalidateJoinAttemptsForPlayer(joined.roomId, joined.playerId, socket.id);
+        this.invalidateJoinAttemptsForPlayer(joined.roomId, joined.playerId, socket.id, generation);
+
         // A disconnected socket leaves behind its membership token until the
         // grace timer fires. It must not make this live reconnect look like a
         // replacement of a socket that is no longer active.
@@ -645,6 +789,7 @@ export class GameSocketGateway
         if (!this.game.getSnapshot(joined.roomId)) {
           const dbRoom = await this.roomService.getRoomById(joined.roomId);
           if (!this.ownsJoinAttempt(socket.id, generation)) throw new Error('Room join superseded');
+          if (attempt.disconnected || socket.disconnected) throw new Error('Room join superseded');
           if (dbRoom.status === 'PLAYING') {
             await this.roomService.resetRoomStatus(joined.roomId);
             if (!this.ownsJoinAttempt(socket.id, generation)) throw new Error('Room join superseded');
@@ -689,24 +834,21 @@ export class GameSocketGateway
           generation,
           joinedPlayer,
         })) {
-          // A newer socket owns this slot; release this attempt's own DB row
-          // without touching the newer socket's state.
-          try {
-            await this.roomService.leaveRoom(joined.roomId, joined.playerId);
-          } catch (rollbackErr) {
-            this.logger.error(
-              'Failed to roll back superseded room join',
-              rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-            );
-          }
-          this.endJoinAttempt(socket.id, generation);
-          return;
+          throw new Error('Room join superseded');
         }
         destinationCommitted = true;
       } catch (err) {
-        // Any failed await after the DB row was created must release it: no
-        // active RoomPlayer may exist without a registered socket.
-        if (joined && !destinationCommitted) {
+        // Any failed await after the DB row was created must release it, but
+        // only when this attempt still owns that row. A newer attempt may have
+        // taken the same player slot while this one was awaiting.
+        const attempt = this.getJoinAttempt(generation);
+        const owner = joined ? this.getMembership(joined.roomId, joined.playerId) : undefined;
+        // An invalidated attempt still owns its own DB row when no other socket
+        // holds that slot (e.g. a competing join lost the race). Never roll
+        // back a row that a newer, live socket has committed.
+        const rollbackRow = !!(joined && !destinationCommitted && attempt?.dbRowOwned &&
+          (!owner || owner.socketId === socket.id));
+        if (rollbackRow && joined) {
           try {
             await this.roomService.leaveRoom(joined.roomId, joined.playerId);
           } catch (rollbackErr) {
@@ -726,6 +868,10 @@ export class GameSocketGateway
           return;
         }
         throw err;
+      } finally {
+        // Every attempt ends its own token, even when invalidated, superseded
+        // or aborted by a disconnect. endJoinAttempt never deletes a newer one.
+        this.endJoinAttempt(socket.id, generation);
       }
     } catch (err) {
       const internalMessage = err instanceof Error ? err.message : String(err);
@@ -1113,7 +1259,6 @@ export class GameSocketGateway
     if (word) socket.emit('turn:yourWord', { word });
   }
 
-
   private dispatchRoomEvent(roomId: string, event: RoomEvent) {
     if (event.targetId) {
       const target = this.roomSockets.get(roomId)?.get(event.targetId);
@@ -1164,6 +1309,7 @@ export class GameSocketGateway
     this.roomSockets.clear();
     this.activeMemberships.clear();
     this.joinAttempts.clear();
+    this.joinAttemptStates.clear();
     this.joinAttemptTargets.clear();
     this.kickedSessions.clear();
   }
