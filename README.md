@@ -31,6 +31,42 @@ regression tests, but it has known architectural, security and operational
 limits (see [Known Limitations](#known-limitations)). Do not expose it to
 untrusted public traffic without the work listed there.
 
+### CI status: GitHub billing lock (commit f67719e, 21 Nov 2026)
+
+[CI run #51](https://github.com/nguyenluunhatminh02/DrawBattle-Arena/actions/runs/44870295188)
+for `f67719e` failed in ~2 seconds with **zero workflow steps executed**: the
+`build` job never started because the GitHub account `nguyenluunhatminh02` is
+**locked for billing**. This is not a code/test failure — earlier runs at
+`d2e7f07` and `0e93d52` stopped the same way. No source change can restore
+Actions; resolve the account lock on GitHub:
+
+1. Sign in as the repository owner and open
+   [Settings → Billing and plans](https://github.com/settings/billing).
+2. Update the payment method / clear the outstanding balance until the account
+   is unlocked (and confirm available Actions minutes).
+3. Re-run the workflow from the run page (**Re-run all jobs**), or push a new
+   commit to `main` to trigger `.github/workflows/ci.yml` again.
+4. Verify the new run executes all steps (install → migrate/seed → typecheck →
+   unit/integration tests → builds → Playwright → smoke) and link that run as
+   the authoritative CI result. A run that still fails in seconds with no
+   steps means the billing lock remains.
+
+While Actions is unavailable, use the local equivalent and attach the generated
+text report as portfolio/CI evidence:
+
+```bash
+./scripts/verify-local-ci.sh   # writes artifacts/local-ci-evidence-<UTC>.txt
+```
+
+It runs install, shared build, Prisma generate/migrate/seed (when
+`DATABASE_URL` is set), typecheck, unit tests, integration tests (when
+`DATABASE_URL`/`REDIS_URL` are set), API/web builds, Playwright E2E + smoke
+(when `E2E_API_URL`/`E2E_WEB_URL` are set) and `pnpm audit --prod`. Skipped
+checks are recorded explicitly, never reported as passes. See
+[docs/local-ci-verification.md](./docs/local-ci-verification.md) for full
+commands, pnpm 9/Docker guidance for pnpm 10+ hosts, and the limits of local
+evidence.
+
 ### Recent Security & Correctness Fixes (Nov 2026)
 - ✅ NestJS DI: Fixed module imports for AdminGuard
 - ✅ Migration dedup: Baseline migration now complete, incremental migrations are no-ops
@@ -145,7 +181,10 @@ Playwright suite expects the API on `:3001` and web on `:3002`; override with
 
 CI runs: install/build → migrate → seed → typecheck → unit tests → DB
 integration tests → clean migration check → builds → Playwright e2e →
-post-deploy smoke check.
+post-deploy smoke check. At commit `f67719e`, GitHub Actions could not start
+these steps because of the account billing lock described in
+[CI status](#ci-status-github-billing-lock-commit-f67719e-21-nov-2026); use
+`./scripts/verify-local-ci.sh` for a local, evidence-producing equivalent.
 
 ## Docker
 

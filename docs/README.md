@@ -12,6 +12,7 @@ This directory documents the architecture **as implemented** at commit `92b3e23`
 | [Observability plan](./observability.md) | What is logged today and the instrumentation backlog. |
 | [Load-test plan](./load-test.md) | Scenarios, existing harness, thresholds, execution procedure. |
 | [Runbook](./runbook.md) | Operational procedures for common incidents. |
+| [Local CI verification](./local-ci-verification.md) | GitHub billing lock at `f67719e` / CI run #51, billing fix + rerun steps, and local CI-equivalent evidence script. |
 
 ## One-paragraph summary
 
