@@ -467,13 +467,20 @@ export class GameSocketGateway
    */
   private async leaveCurrentRoom(
     socket: AuthedSocket,
-  ): Promise<{ roomId: string; playerId: string; roomCode?: string; socketId: string } | null> {
+  ): Promise<{
+    roomId: string;
+    playerId: string;
+    roomCode?: string;
+    socketId: string;
+    verifiedPassword?: string;
+  } | null> {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
     if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return null;
     const ownerSocketId = socket.id;
     const roomCode = socket.data.roomCode;
-    const membershipGeneration = this.getMembership(roomId, playerId)?.generation;
+    const membership = this.getMembership(roomId, playerId);
+    const membershipGeneration = membership?.generation;
 
     // Persist the departure before releasing in-memory state so a rejected
     // write aborts the switch and leaves the old membership intact.
@@ -499,7 +506,15 @@ export class GameSocketGateway
     socket.data.roomId = undefined;
     socket.data.roomCode = undefined;
     socket.data.playerId = undefined;
-    return { roomId, playerId, roomCode, socketId: ownerSocketId };
+    return {
+      roomId,
+      playerId,
+      roomCode,
+      socketId: ownerSocketId,
+      // Reuse only the credential verified for this slot's live join so a
+      // failed switch can reactivate the same protected row idempotently.
+      verifiedPassword: membership?.verifiedPassword,
+    };
   }
 
   /**
@@ -569,10 +584,16 @@ export class GameSocketGateway
    */
   private async restorePreviousRoom(
     socket: AuthedSocket,
-    previous: { roomId: string; playerId: string; roomCode?: string; socketId: string },
+    previous: {
+      roomId: string;
+      playerId: string;
+      roomCode?: string;
+      socketId: string;
+      verifiedPassword?: string;
+    },
     attemptGeneration: number,
   ): Promise<boolean> {
-    const { roomId, playerId, roomCode, socketId } = previous;
+    const { roomId, playerId, roomCode, socketId, verifiedPassword } = previous;
     if (!this.ownsJoinAttempt(socket.id, attemptGeneration)) return false;
     if (socket.disconnected) return false;
     if (this.getMembership(roomId, playerId) && this.getMembership(roomId, playerId)!.socketId !== socketId) {
@@ -592,6 +613,7 @@ export class GameSocketGateway
         nickname,
         socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
         socket.data.identityType === 'user' ? socket.data.userId! : null,
+        verifiedPassword,
       );
       if (!this.ownsJoinAttempt(socket.id, attemptGeneration)) return false;
       if (socket.disconnected) return false;

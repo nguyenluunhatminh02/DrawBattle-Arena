@@ -201,6 +201,54 @@ describe('GameSocketGateway kick and disconnect timers', () => {
     expect(roomService.leaveRoom).not.toHaveBeenCalledWith('room-2', 'p1');
   });
 
+  it('creates a room-2 timer for the same player without clearing the room-1 timer', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const oldSocket = makeSocket('old-socket', {
+      identityType: 'guest', sessionId: 'guest-1', nickname: 'Player',
+      playerId: 'p1', roomId: 'room-1', roomCode: 'AAA111',
+    });
+    oldSocket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
+    gateway.handleDisconnect(oldSocket);
+    const oldTimer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
+    expect(oldTimer).toBeDefined();
+
+    // Stagger the second disconnect so the room-1 deadline can be observed
+    // independently before the room-2 grace period is due.
+    await jest.advanceTimersByTimeAsync(5_000);
+
+    // A genuinely different active socket for the same player in another room.
+    const room2Socket = makeSocket('room2-socket', {
+      identityType: 'guest', sessionId: 'guest-2', nickname: 'Player2',
+      playerId: 'p1', roomId: 'room-2', roomCode: 'BBB222',
+    });
+    room2Socket.join('room-2');
+    (gateway as any).roomSockets.set('room-2', new Map([['p1', room2Socket]]));
+    (gateway as any).activeMemberships.set('room-2\u0000p1', { generation: 2, socketId: room2Socket.id });
+
+    gateway.handleDisconnect(room2Socket);
+    const room2Timer = (gateway as any).disconnectTimers.get('room-2\u0000p1');
+    expect(room2Timer).toBeDefined();
+    expect(room2Timer.roomId).toBe('room-2');
+    expect(room2Timer.socketId).toBe(room2Socket.id);
+    expect((gateway as any).disconnectTimers.get('room-1\u0000p1')).toBe(oldTimer);
+
+    // 10s reaches room-1's 15s deadline without reaching room-2's.
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(roomService.leaveRoom).toHaveBeenCalledWith('room-1', 'p1');
+    expect(roomService.leaveRoom).not.toHaveBeenCalledWith('room-2', 'p1');
+    // The room-1 timer expires on its own; the room-2 grace period is untouched.
+    expect((gateway as any).disconnectTimers.has('room-1\u0000p1')).toBe(false);
+    expect((gateway as any).disconnectTimers.get('room-2\u0000p1')).toBe(room2Timer);
+    expect((gateway as any).activeMemberships.get('room-2\u0000p1')).toEqual({
+      generation: 2,
+      socketId: room2Socket.id,
+    });
+    expect(game.removePlayer).toHaveBeenCalledWith('room-1', 'p1');
+    expect(game.removePlayer).not.toHaveBeenCalledWith('room-2', 'p1');
+  });
+
   it('does not cancel a newer replacement timer when a slow kick ban completes', async () => {
     const { gateway, roomService } = makeGateway();
     const host = makeHostSocket(gateway);
@@ -409,9 +457,13 @@ describe('GameSocketGateway room switch failure recovery', () => {
     };
   }
 
-  function seedOldRoom(gateway: GameSocketGateway, socket: any) {
+  function seedOldRoom(gateway: GameSocketGateway, socket: any, verifiedPassword?: string) {
     (gateway as any).roomSockets.set('room-1', new Map([['p1', socket]]));
-    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: socket.id });
+    (gateway as any).activeMemberships.set('room-1\u0000p1', {
+      generation: 1,
+      socketId: socket.id,
+      verifiedPassword,
+    });
     socket.data.playerId = 'p1';
     socket.data.roomId = 'room-1';
     socket.data.roomCode = 'AAA111';
@@ -421,7 +473,7 @@ describe('GameSocketGateway room switch failure recovery', () => {
   it('restores the old room when the destination join fails after a successful leave', async () => {
     const { gateway, roomService, game } = makeGateway();
     const socket = makeSocket('s1', authedData('guest-1'));
-    seedOldRoom(gateway, socket);
+    seedOldRoom(gateway, socket, 'old-room-password');
     roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
     roomService.joinRoom.mockRejectedValueOnce(new Error('db down')).mockResolvedValue({
       roomId: 'room-1', roomCode: 'AAA111', playerId: 'p1',
@@ -431,7 +483,34 @@ describe('GameSocketGateway room switch failure recovery', () => {
 
     expect(roomService.leaveRoom).toHaveBeenCalledWith('room-1', 'p1');
     expect(roomService.joinRoom).toHaveBeenLastCalledWith(
-      'AAA111', 'Player', 'guest-1', null,
+      'AAA111', 'Player', 'guest-1', null, 'old-room-password',
+    );
+    expect(socket.data.roomId).toBe('room-1');
+    expect(socket.data.playerId).toBe('p1');
+    expect(socket.rooms.has('room-1')).toBe(true);
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(socket);
+    expect(socket.emit).toHaveBeenCalledWith('error', 'JOIN_FAILED', 'Could not join room');
+  });
+
+  it('restores a password-protected old room with the verified membership password', async () => {
+    const { gateway, roomService } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+    const roomPassword = 'old-room-password';
+    seedOldRoom(gateway, socket, roomPassword);
+    roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
+    roomService.joinRoom.mockImplementation(
+      (code: string, _nickname: string, _guest: string | null, _user: string | null, password?: string) => {
+        if (code === 'BBB222') return Promise.reject(new Error('db down'));
+        // RoomService validates the password before reactivating a left row.
+        if (password !== roomPassword) return Promise.reject(new Error('Invalid password'));
+        return Promise.resolve({ roomId: 'room-1', roomCode: 'AAA111', playerId: 'p1' });
+      },
+    );
+
+    await gateway.onRoomJoin(socket, { roomCode: 'BBB222' });
+
+    expect(roomService.joinRoom).toHaveBeenLastCalledWith(
+      'AAA111', 'Player', 'guest-1', null, roomPassword,
     );
     expect(socket.data.roomId).toBe('room-1');
     expect(socket.data.playerId).toBe('p1');
