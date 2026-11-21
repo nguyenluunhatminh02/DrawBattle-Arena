@@ -1,23 +1,30 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
-import { writeFile, mkdir, unlink } from 'fs/promises';
+import { writeFile, mkdir, unlink, rename, readdir } from 'fs/promises';
 import { basename, join } from 'path';
 import { Worker } from 'worker_threads';
 import { existsSync } from 'fs';
 import { RenderJobRecord, ReplayJobService } from './replay-jobs';
+import {
+  REPLAY_STATIC_PREFIX,
+  replayFileUrl,
+  replayGifFilename,
+  replayRenderDir,
+  replayFilenameFromPointer,
+} from './replay-paths';
 
 const RENDER_TIMEOUT_MS = 60_000;
 const RECONCILE_BATCH_SIZE = 100;
 const CLEANUP_BATCH_SIZE = 100;
 const DEFAULT_CLEANUP_MAX_AGE_DAYS = 30;
-const REPLAY_URL_PREFIX = '/replays/';
 const SHUTDOWN_ERROR = 'Replay worker shut down during render';
 
 @Injectable()
 export class ReplayWorker implements OnModuleDestroy {
   private readonly logger = new Logger(ReplayWorker.name);
-  private readonly renderDir = join(process.cwd(), 'public', 'replays');
+  private readonly renderDir = replayRenderDir();
+  private readonly legacyRenderDir = join(process.cwd(), 'public', 'replays');
   private readonly activeJobs = new Map<string, Promise<void>>();
   private readonly activeWorkers = new Map<string, Worker>();
   private readonly MAX_CONCURRENT = 3;
@@ -97,6 +104,88 @@ export class ReplayWorker implements OnModuleDestroy {
       }
     }
     return pending.length;
+  }
+
+  /**
+   * Move legacy public GIFs into the private directory and rewrite their
+   * pointers to the guarded file route. Files with no matching row are removed
+   * so the unauthenticated static path is closed immediately. Rows whose file
+   * is missing are cleared for re-render.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async migrateLegacyPublicGifs() {
+    if (this.shuttingDown) return { migrated: 0, cleared: 0, removed: 0 };
+
+    let legacyFiles: string[] = [];
+    try {
+      legacyFiles = (await readdir(this.legacyRenderDir)).filter(
+        name => /^[A-Za-z0-9_-]+\.gif$/.test(name) && name === basename(name),
+      );
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn(
+          'Could not list legacy public replay GIFs',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
+    let migrated = 0;
+    let cleared = 0;
+    let removed = 0;
+    await mkdir(this.renderDir, { recursive: true });
+
+    for (const filename of legacyFiles) {
+      const source = join(this.legacyRenderDir, filename);
+      const target = join(this.renderDir, filename);
+      try {
+        if (existsSync(target)) {
+          await unlink(source);
+        } else {
+          await rename(source, target);
+          migrated++;
+        }
+        removed++;
+      } catch (err) {
+        this.logger.warn(
+          `Could not migrate legacy replay GIF ${filename}`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
+    try {
+      const legacyRows = await this.prisma.replay.findMany({
+        where: { gifUrl: { not: null } },
+        select: { id: true, gifUrl: true },
+        take: RECONCILE_BATCH_SIZE,
+      });
+      for (const replay of legacyRows) {
+        if (replayFilenameFromPointer(replay.gifUrl, replay.id) === null) continue;
+        if (!replay.gifUrl!.startsWith(REPLAY_STATIC_PREFIX)) continue;
+        const filePath = join(this.renderDir, replayGifFilename(replay.id));
+        if (!existsSync(filePath)) {
+          await this.prisma.replay.update({
+            where: { id: replay.id },
+            data: { gifUrl: null },
+          });
+          cleared++;
+          continue;
+        }
+        await this.prisma.replay.update({
+          where: { id: replay.id },
+          data: { gifUrl: replayFileUrl(replay.id) },
+        });
+        migrated++;
+      }
+    } catch (err) {
+      this.logger.error(
+        'Could not reconcile legacy replay GIF pointers',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    return { migrated, cleared, removed };
   }
 
   /** Compensating cleanup for workers still in memory after a long outage. */
@@ -239,11 +328,11 @@ export class ReplayWorker implements OnModuleDestroy {
           const gifBuffer = result as Buffer;
           await mkdir(this.renderDir, { recursive: true });
 
-          const filename = `${replayId}.gif`;
+          const filename = replayGifFilename(replayId);
           const filepath = join(this.renderDir, filename);
           await writeFile(filepath, gifBuffer);
 
-          const gifUrl = `${REPLAY_URL_PREFIX}${filename}`;
+          const gifUrl = replayFileUrl(replayId);
           await this.prisma.replay.update({
             where: { id: replayId },
             data: { gifUrl },
@@ -302,7 +391,7 @@ export class ReplayWorker implements OnModuleDestroy {
 
     let deleted = 0;
     for (const replay of old) {
-      const filepath = this.gifPathFor(replay.gifUrl);
+      const filepath = this.gifPathFor(replay.gifUrl, replay.id);
       if (!filepath) {
         this.logger.warn(`Refusing to clean up unsafe gifUrl for replay ${replay.id}`);
         continue;
@@ -329,10 +418,9 @@ export class ReplayWorker implements OnModuleDestroy {
     return { deleted };
   }
 
-  /** Only accept locally generated /replays/<basename>.gif paths. */
-  private gifPathFor(gifUrl: string | null): string | null {
-    if (!gifUrl || !gifUrl.startsWith(REPLAY_URL_PREFIX)) return null;
-    const filename = gifUrl.slice(REPLAY_URL_PREFIX.length);
+  /** Only accept locally generated pointers whose file lives in the private dir. */
+  private gifPathFor(gifUrl: string | null, replayId: string): string | null {
+    const filename = replayFilenameFromPointer(gifUrl, replayId);
     if (!filename || filename !== basename(filename)) return null;
     if (!/^[A-Za-z0-9_-]+\.gif$/.test(filename)) return null;
     return join(this.renderDir, filename);

@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import type { Request, Response } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { AccountBodyValidationGuard } from './common/account-body-validation.guard';
@@ -41,7 +42,12 @@ async function bootstrap() {
   app.useGlobalGuards(new AccountBodyValidationGuard());
 
   app.setGlobalPrefix('api');
-  app.useStaticAssets(join(process.cwd(), 'public'));
+  // Replay GIFs are private and streamed by the guarded file route. Block the
+  // legacy /replays/<id>.gif static path so it cannot bypass visibility checks.
+  app.use('/replays', (_req: Request, res: Response) =>
+    res.status(404).json({ message: 'Not Found' }),
+  );
+  app.useStaticAssets(join(process.cwd(), 'public'), { prefix: '/', index: false });
 
   const port = process.env.PORT || 3001;
   await app.listen(port);

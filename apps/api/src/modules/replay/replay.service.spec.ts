@@ -163,7 +163,7 @@ describe('ReplayService visibility (P1-01)', () => {
     await expect(service.getRenderStatus('replay-1')).resolves.toEqual({ status: 'completed' });
   });
 
-  it('enforces visibility on the GIF read path', async () => {
+  it('enforces visibility on the GIF read path and returns a guarded URL', async () => {
     const { service, prisma, jobs, roomPlayerFindFirst } = createService();
     prisma.replay.findUnique.mockResolvedValue(replayWithVisibility('PRIVATE'));
     jobs.getJobByReplay.mockResolvedValue(null);
@@ -174,7 +174,22 @@ describe('ReplayService visibility (P1-01)', () => {
 
     roomPlayerFindFirst.mockResolvedValue({ id: 'room-player-1' });
     await expect(service.getGif('replay-1', { authorization: bearer('user') })).resolves.toBe(
-      '/replays/replay-1.gif',
+      '/api/replays/file/replay-1.gif',
     );
+  });
+
+  it('requires authorization before queueing a render (P2-03)', async () => {
+    const { service, prisma, jobs, roomPlayerFindFirst } = createService();
+    prisma.replay.findUnique.mockResolvedValue(replayWithVisibility('PRIVATE'));
+    jobs.queueReplay.mockResolvedValue({ jobId: 'job-1', status: 'queued' });
+
+    await expect(service.queueRender('replay-1')).rejects.toBeInstanceOf(NotFoundException);
+    expect(jobs.queueReplay).not.toHaveBeenCalled();
+
+    roomPlayerFindFirst.mockResolvedValue({ id: 'room-player-1' });
+    await expect(
+      service.queueRender('replay-1', { authorization: bearer('user') }),
+    ).resolves.toEqual({ jobId: 'job-1', status: 'queued' });
+    expect(jobs.queueReplay).toHaveBeenCalledWith('replay-1');
   });
 });

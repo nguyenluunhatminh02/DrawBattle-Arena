@@ -1,7 +1,20 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  StreamableFile,
+} from '@nestjs/common';
 import { verify } from 'jsonwebtoken';
+import { createReadStream } from 'fs';
+import { stat } from 'fs/promises';
+import { basename, join } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReplayJobService } from './replay-jobs';
+import {
+  replayFileUrl,
+  replayGifFilename,
+  replayRenderDir,
+} from './replay-paths';
 
 /**
  * Per-request information used by the replay visibility check. The controller
@@ -65,6 +78,7 @@ const VISIBILITY_RELATIONS = {
 @Injectable()
 export class ReplayService {
   private readonly logger = new Logger(ReplayService.name);
+  private readonly renderDir = replayRenderDir();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -219,7 +233,9 @@ export class ReplayService {
     return this.toPublicReplay(replay);
   }
 
-  async queueRender(replayId: string) {
+  /** Rendering is a read of the replay content and needs the same authorization. */
+  async queueRender(replayId: string, context?: ReplayReadContext) {
+    await this.assertAccessByReplayId(replayId, context);
     return this.jobs.queueReplay(replayId);
   }
 
@@ -251,8 +267,39 @@ export class ReplayService {
   async getGif(replayId: string, context?: ReplayReadContext) {
     const replay = await this.getReplay(replayId, context);
     const job = await this.jobs.getJobByReplay(replayId);
-    const gifUrl = this.jobs.assertRendered(replay, job);
-    return gifUrl;
+    this.jobs.assertRendered(replay, job);
+    return replayFileUrl(replayId);
+  }
+
+  /**
+   * Streams the GIF only after the replay visibility check succeeds. The stored
+   * pointer is ignored: the filename is derived from the authorized replay id,
+   * so a tampered row cannot point at another file.
+   */
+  async streamGif(
+    replayId: string,
+    context?: ReplayReadContext,
+  ): Promise<StreamableFile> {
+    const replay = await this.getReplay(replayId, context);
+    const job = await this.jobs.getJobByReplay(replayId);
+    this.jobs.assertRendered(replay, job);
+
+    const filename = replayGifFilename(replayId);
+    if (filename !== basename(filename) || !/^[A-Za-z0-9_-]+\.gif$/.test(filename)) {
+      throw new NotFoundException('Replay GIF not found');
+    }
+    const filepath = join(this.renderDir, filename);
+    try {
+      const info = await stat(filepath);
+      if (!info.isFile()) throw new NotFoundException('Replay GIF not found');
+    } catch (err) {
+      if (err instanceof NotFoundException) throw err;
+      throw new NotFoundException('Replay GIF not found');
+    }
+    return new StreamableFile(createReadStream(filepath), {
+      type: 'image/gif',
+      disposition: `inline; filename="${filename}"`,
+    });
   }
 
   async updateGifUrl(replayId: string, gifUrl: string) {

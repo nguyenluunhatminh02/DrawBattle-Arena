@@ -207,11 +207,10 @@ export class InMemoryJobStore implements JobStore {
 
   async retryNow(jobId: string, now: Date) {
     const job = this.jobs.get(jobId);
-    if (!job || job.state !== 'failed') return null;
+    if (!job || job.state !== 'failed' || job.attempts >= job.maxAttempts) return null;
     const updated: RenderJobRecord = {
       ...job,
       state: 'queued',
-      attempts: 0,
       error: null,
       nextAttemptAt: now,
       lockedBy: null,
@@ -383,10 +382,9 @@ export class PrismaJobStore implements JobStore {
 
   async retryNow(jobId: string, now: Date) {
     const updated = await this.prisma.renderJob.updateMany({
-      where: { id: jobId, state: 'failed' },
+      where: { id: jobId, state: 'failed', attempts: { lt: MAX_RENDER_ATTEMPTS } },
       data: {
         state: 'queued',
-        attempts: 0,
         error: null,
         nextAttemptAt: now,
         lockedBy: null,
@@ -442,9 +440,10 @@ export class ReplayJobService {
     if (!job) job = await this.store.create(replayId, now);
     if (job.state === 'completed') return { jobId: job.id, status: 'completed' };
     if (job.state === 'failed') {
-      // A public retry resets the retry budget instead of requiring an admin endpoint.
-      job = (await this.store.retryNow(job.id, now)) ?? job;
-      return { jobId: job.id, status: job.state };
+      // Failed is terminal once the original attempt budget is exhausted.
+      // A retry may only requeue within that budget; it must never reset attempts.
+      const retried = await this.store.retryNow(job.id, now);
+      return { jobId: job.id, status: retried?.state ?? job.state };
     }
     if (job.state === 'running' && !isLeaseExpired(job, now)) {
       throw new ConflictException({

@@ -122,6 +122,40 @@ describe('ReplayWorker', () => {
     ).rejects.toThrow(/shut down/);
   });
 
+  it('moves legacy public GIFs into the private directory and rewrites pointers', async () => {
+    const { mkdtemp, mkdir, writeFile, readFile, rm } = jest.requireActual('fs/promises');
+    const os = jest.requireActual('os');
+    const path = jest.requireActual('path');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'replay-migration-'));
+    await mkdir(path.join(dir, 'public', 'replays'), { recursive: true });
+    await writeFile(path.join(dir, 'public', 'replays', 'replay-1.gif'), 'gif');
+    const cwd = jest.spyOn(process, 'cwd').mockReturnValue(dir);
+
+    try {
+      const { worker, prisma } = makeWorker([
+        { id: 'replay-1', gifUrl: '/replays/replay-1.gif' },
+        { id: 'replay-gone', gifUrl: '/replays/replay-gone.gif' },
+      ]);
+      const result = await worker.migrateLegacyPublicGifs();
+
+      expect(result).toEqual({ migrated: 2, cleared: 1, removed: 1 });
+      await expect(
+        readFile(path.join(dir, 'private', 'replays', 'replay-1.gif'), 'utf8'),
+      ).resolves.toBe('gif');
+      expect(prisma.replay.update).toHaveBeenCalledWith({
+        where: { id: 'replay-1' },
+        data: { gifUrl: '/api/replays/file/replay-1.gif' },
+      });
+      expect(prisma.replay.update).toHaveBeenCalledWith({
+        where: { id: 'replay-gone' },
+        data: { gifUrl: null },
+      });
+    } finally {
+      cwd.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('registers a daily cleanup cron in addition to the minute crons', () => {
     // Decorators execute at class definition time; the mock records them.
     const crons = jest.requireMock('@nestjs/schedule').CronExpression as Record<string, string>;
@@ -157,14 +191,14 @@ describe('ReplayWorker', () => {
     const os = jest.requireActual('os');
     const path = jest.requireActual('path');
     const dir = await mkdtemp(path.join(os.tmpdir(), 'replay-cleanup-'));
-    await mkdir(path.join(dir, 'public', 'replays'), { recursive: true });
-    await writeFile(path.join(dir, 'public', 'replays', 'replay-1.gif'), 'gif');
+    await mkdir(path.join(dir, 'private', 'replays'), { recursive: true });
+    await writeFile(path.join(dir, 'private', 'replays', 'replay-1.gif'), 'gif');
     const cwd = jest.spyOn(process, 'cwd').mockReturnValue(dir);
 
     try {
       const { worker, prisma } = makeWorker([
-        { id: 'replay-1', gifUrl: '/replays/replay-1.gif' },
-        { id: 'replay-missing', gifUrl: '/replays/missing.gif' },
+        { id: 'replay-1', gifUrl: '/api/replays/file/replay-1.gif' },
+        { id: 'replay-missing', gifUrl: '/api/replays/file/replay-missing.gif' },
         { id: 'replay-unsafe', gifUrl: '/replays/../../etc/passwd' },
         { id: 'replay-external', gifUrl: 'https://example.com/replays/x.gif' },
       ]);

@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Headers,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ReplayService, type ReplayReadContext } from './replay.service';
 import { Throttle } from '../../common/throttle.guard';
@@ -83,8 +84,31 @@ export class ReplayController {
   @Post(':id/render')
   @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ limit: 3, windowMs: 60_000, keyPrefix: 'replay-render' })
-  async queueRender(@Param('id') id: string) {
-    return this.replayService.queueRender(id);
+  async queueRender(
+    @Param('id') id: string,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ) {
+    return this.replayService.queueRender(
+      id,
+      this.readContext(authorization, share, shareHeader),
+    );
+  }
+
+  /** Guarded replacement for the former unauthenticated static GIF URL. */
+  @Get('file/:id.gif')
+  @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-read' })
+  async getGifFile(
+    @Param('id') id: string,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ): Promise<StreamableFile> {
+    return this.replayService.streamGif(
+      id,
+      this.readContext(authorization, share, shareHeader),
+    );
   }
 
   @Get(':id/gif')

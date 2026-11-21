@@ -57,6 +57,25 @@ describe('render job state machine', () => {
     });
   });
 
+  it('does not grant an exhausted job a fresh attempt budget (P2-03)', async () => {
+    const store = new InMemoryJobStore();
+    const created = await store.create('replay-1', now);
+    for (let attempt = 0; attempt < MAX_RENDER_ATTEMPTS; attempt++) {
+      const attemptTime = new Date(now.getTime() + attempt * 30 * 60_000);
+      await store.markRunning(created.id, 'worker-a', attemptTime);
+      await store.fail(created.id, 'worker-a', `failure ${attempt}`, attemptTime);
+    }
+    const exhausted = await store.findById(created.id);
+    expect(exhausted).toMatchObject({ state: 'failed', attempts: MAX_RENDER_ATTEMPTS });
+
+    // A retry must not requeue the exhausted job or reset its attempts.
+    expect(await store.retryNow(created.id, now)).toBeNull();
+    expect(await store.findById(created.id)).toMatchObject({
+      state: 'failed',
+      attempts: MAX_RENDER_ATTEMPTS,
+    });
+  });
+
   it('only treats running jobs past their lease as expired', () => {
     expect(isLeaseExpired(job({ state: 'running', lockedAt: now }), now)).toBe(false);
     expect(

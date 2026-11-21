@@ -50,6 +50,13 @@ module.exports = {
         destination: `${INTERNAL_API_URL}/avatars/:path*`,
       },
       {
+        // Legacy GIF URLs are no longer public assets. Route them to the
+        // guarded file endpoint, which checks replay visibility first.
+        source: '/replays/:file.gif',
+        destination: `${INTERNAL_API_URL}/api/replays/file/:file.gif`,
+      },
+      {
+        // Other /replays/* paths hit the API's 404 static guard.
         source: '/replays/:path*',
         destination: `${INTERNAL_API_URL}/replays/:path*`,
       },

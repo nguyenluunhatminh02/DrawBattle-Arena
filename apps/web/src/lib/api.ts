@@ -152,6 +152,20 @@ export const api = {
     });
   },
 
+  /** Queue a replay render with the same auth/share context as read endpoints. */
+  queueReplayRender(
+    replayId: string,
+    options?: { token?: string; share?: string },
+  ) {
+    const headers: Record<string, string> = {};
+    if (options?.token) headers.Authorization = `Bearer ${options.token}`;
+    if (options?.share) headers['X-Share-Token'] = options.share;
+    return request<{ jobId: string; status: string }>(
+      `/replays/${encodeURIComponent(replayId)}/render`,
+      { method: 'POST', headers },
+    );
+  },
+
   getMatchResults(id: string) {
     return request<{
       matchId: string;
