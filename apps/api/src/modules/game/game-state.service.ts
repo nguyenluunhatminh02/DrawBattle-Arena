@@ -206,11 +206,16 @@ export class GameStateService {
     const previous = this.pendingStatusWrites.get(roomId) ?? Promise.resolve();
     const chained = previous.then(() => write);
     this.pendingStatusWrites.set(roomId, chained);
-    void chained.finally(() => {
+    const clearPending = () => {
       if (this.pendingStatusWrites.get(roomId) === chained) {
         this.pendingStatusWrites.delete(roomId);
       }
-    });
+    };
+    // Callers may fire-and-forget this write, and .finally()/.then() create a
+    // derived promise: both must observe rejection or a P2034 becomes an
+    // unhandled rejection that crashes the process.
+    void chained.catch(() => undefined);
+    void chained.then(clearPending, clearPending);
     return chained;
   }
 

@@ -211,9 +211,13 @@ describe('GameStateService room status persistence', () => {
 
   it('retries P2034 status conflicts with a bound', async () => {
     const conflict = Object.assign(new Error('write conflict'), { code: 'P2034' });
-    roomUpdate.mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict).mockResolvedValue({});
+    roomUpdate
+      .mockImplementationOnce(() => Promise.reject(conflict))
+      .mockImplementationOnce(() => Promise.reject(conflict))
+      .mockResolvedValue({});
 
-    await expect(service.startMatch(roomId)).resolves.toBe(true);
+    const started = service.startMatch(roomId);
+    await expect(started).resolves.toBe(true);
     expect(roomUpdate).toHaveBeenCalledTimes(3);
   });
 
@@ -225,7 +229,8 @@ describe('GameStateService room status persistence', () => {
       .spyOn((service as any).logger, 'error')
       .mockImplementation((...args: unknown[]) => errors.push(args));
 
-    await expect(service.startMatch(roomId)).resolves.toBe(false);
+    const started = service.startMatch(roomId);
+    await expect(started).resolves.toBe(false);
     expect(roomUpdate).toHaveBeenCalledTimes(3);
     expect((service as any).rooms.get(roomId).match).toBeNull();
     expect(errors.some(args => String(args[0]).includes('Failed to persist room'))).toBe(true);
@@ -236,7 +241,8 @@ describe('GameStateService room status persistence', () => {
     roomUpdate.mockRejectedValueOnce(new Error('db down'));
     jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
 
-    await expect(service.startMatch(roomId)).resolves.toBe(false);
+    const started = service.startMatch(roomId);
+    await expect(started).resolves.toBe(false);
     expect(roomUpdate).toHaveBeenCalledTimes(1);
   });
 });
