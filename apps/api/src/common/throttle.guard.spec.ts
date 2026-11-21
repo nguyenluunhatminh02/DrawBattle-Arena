@@ -23,7 +23,11 @@ describe('ThrottleGuard', () => {
 
   const makeContext = (
     ip: string,
-    opts: { headers?: Record<string, string>; user?: { id?: string }; guest?: { sessionId?: string } } = {},
+    opts: {
+      headers?: Record<string, string>;
+      user?: { id?: string; type?: string };
+      guest?: { sessionId?: string };
+    } = {},
   ): ExecutionContext =>
     ({
       getHandler: () => ({}),
@@ -96,7 +100,7 @@ describe('ThrottleGuard', () => {
     await expect(guard.canActivate(ctxB)).rejects.toThrow();
   });
 
-  it('keys buckets by authenticated identity when available', async () => {
+  it('keys buckets by authenticated identity alongside the resolved IP', async () => {
     mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'identity-test' });
     const ctxA = makeContext('127.0.0.1', { user: { id: 'user-a' } });
     const ctxB = makeContext('127.0.0.1', { user: { id: 'user-b' } });
@@ -124,15 +128,78 @@ describe('ThrottleGuard', () => {
     await expect(guard.canActivate(ctxB)).rejects.toThrow();
   });
 
-  it('separates user and guest tokens that share the same subject id', async () => {
-    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'bearer-type-split' });
-    const userToken = jwt.sign({ sub: 'same-id', type: 'user' }, JWT_SECRET);
-    const guestToken = jwt.sign({ sub: 'same-id', type: 'guest' }, JWT_SECRET);
-    const ctxUser = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${userToken}` } });
-    const ctxGuest = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${guestToken}` } });
-    await expect(guard.canActivate(ctxUser)).resolves.toBe(true);
-    await expect(guard.canActivate(ctxGuest)).resolves.toBe(true);
-    await expect(guard.canActivate(ctxUser)).rejects.toThrow();
+  it('shares one IP bucket across many distinct guest tokens', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'guest-bucket' });
+    const guestTokenFor = (id: string) => jwt.sign({ sub: id, type: 'guest' }, JWT_SECRET);
+
+    // Guest sessions are freely mintable; rotating their sub must not split
+    // the bucket for this IP.
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', {
+        headers: { authorization: `Bearer ${guestTokenFor('guest-1')}` },
+      })),
+    ).resolves.toBe(true);
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', {
+        headers: { authorization: `Bearer ${guestTokenFor('guest-2')}` },
+      })),
+    ).rejects.toThrow();
+  });
+
+  it('ignores populated guest principals when keying buckets', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'guest-principal' });
+
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', { guest: { sessionId: 'guest-session-1' } })),
+    ).resolves.toBe(true);
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', { guest: { sessionId: 'guest-session-2' } })),
+    ).rejects.toThrow();
+  });
+
+  it('keeps the IP in verified user buckets and separates different IPs', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'user-ip-bucket' });
+    const token = jwt.sign({ sub: 'user-a', type: 'user' }, JWT_SECRET);
+    const buckets = (guard as any).buckets as Map<string, unknown>;
+
+    const ctxSameIp = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${token}` } });
+    const ctxOtherIp = makeContext('10.0.0.9', { headers: { authorization: `Bearer ${token}` } });
+    await expect(guard.canActivate(ctxSameIp)).resolves.toBe(true);
+    // Same identity but a different IP is a different bucket.
+    await expect(guard.canActivate(ctxOtherIp)).resolves.toBe(true);
+    await expect(guard.canActivate(ctxSameIp)).rejects.toThrow();
+
+    const keys = [...buckets.keys()];
+    expect(keys).toHaveLength(2);
+    expect(keys).toEqual(expect.arrayContaining([
+      expect.stringContaining('127.0.0.1'),
+      expect.stringContaining('10.0.0.9'),
+    ]));
+  });
+
+  it('treats forged tokens like anonymous callers from the same IP', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'forged-bucket' });
+    const forgedFor = (id: string) =>
+      jwt.sign({ sub: id, type: 'user' }, 'a-different-secret-of-similar-length');
+    const buckets = (guard as any).buckets as Map<string, unknown>;
+
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', {
+        headers: { authorization: `Bearer ${forgedFor('attacker-1')}` },
+      })),
+    ).resolves.toBe(true);
+    // Many forged tokens and a plain anonymous caller share the IP bucket.
+    for (const id of ['attacker-2', 'attacker-3', 'attacker-4']) {
+      await expect(
+        guard.canActivate(makeContext('127.0.0.1', {
+          headers: { authorization: `Bearer ${forgedFor(id)}` },
+        })),
+      ).rejects.toThrow();
+    }
+    await expect(guard.canActivate(makeContext('127.0.0.1'))).rejects.toThrow();
+
+    expect([...buckets.keys()]).toHaveLength(1);
+    expect([...buckets.keys()][0]).toContain('anon');
   });
 
   it('bounds the bucket map against rotating identities', async () => {

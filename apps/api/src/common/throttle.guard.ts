@@ -66,27 +66,32 @@ export function Throttle(config: ThrottleConfig) {
 type Bucket = { count: number; resetAt: number };
 
 /**
- * Resolve a throttle identity directly from the bearer token. Global guards
- * run before controller-level `OptionalAuthGuard`, so `request.user` and
- * `request.guest` are not populated when this guard executes. Verifying the
- * token here (with the same JWT_SECRET and algorithm as JwtService) keeps
- * identity-based buckets working regardless of guard registration order, and
- * a forged/invalid token still falls back to the trusted `req.ip` bucket.
+ * Resolve a throttle identity from a verified *user* principal. Global guards
+ * run before controller-level `OptionalAuthGuard`, so `request.user` may not
+ * be populated when this guard executes. Verifying the bearer token here (with
+ * the same JWT_SECRET and algorithm as JwtService) keeps identity-based
+ * buckets working regardless of guard registration order; forged/invalid
+ * tokens fall back to the trusted `req.ip` bucket.
  *
- * Only the token's signed `sub`/`type` are used, so an attacker cannot choose
- * an arbitrary bucket key. Validity checks that need the database (deleted
- * users, expired guest sessions) remain in the auth guards; a stale token can
- * at worst exhaust its own identity bucket, not another caller's.
+ * Guest tokens are deliberately ignored: anyone can mint as many as they like
+ * and rotating their `sub` must not split an IP's bucket. For the same reason
+ * only the signed `type === 'user'` sub is accepted, so a caller cannot choose
+ * an arbitrary bucket key. Database validity checks (deleted users) remain in
+ * the auth guards; a stale user token can at worst exhaust its own bucket.
+ * The resolved IP is always part of the final key, never replaced by identity.
  */
-function bearerIdentity(request: {
+function userIdentity(request: {
   headers?: Record<string, unknown>;
-  user?: { id?: string };
-  guest?: { sessionId?: string };
+  user?: { id?: string; type?: string };
 }): string | null {
-  const populated =
-    (typeof request.user?.id === 'string' && request.user.id) ||
-    (typeof request.guest?.sessionId === 'string' && request.guest.sessionId);
-  if (populated) return `identity:${populated}`;
+  const populated = request.user;
+  if (
+    (populated?.type === undefined || populated.type === 'user') &&
+    typeof populated?.id === 'string' &&
+    populated.id
+  ) {
+    return `identity:user:${populated.id}`;
+  }
 
   const header = request.headers?.authorization;
   if (typeof header !== 'string' || !header.startsWith('Bearer ')) return null;
@@ -99,11 +104,8 @@ function bearerIdentity(request: {
       sub?: unknown;
       type?: unknown;
     };
-    if ((payload.type === 'user' || payload.type === 'guest') &&
-        typeof payload.sub === 'string' && payload.sub) {
-      // Namespace by type so the same UUID in a user and a guest token cannot
-      // share a bucket.
-      return `identity:${payload.type}:${payload.sub}`;
+    if (payload.type === 'user' && typeof payload.sub === 'string' && payload.sub) {
+      return `identity:user:${payload.sub}`;
     }
   } catch {
     // Invalid signature, expired or malformed token: fall back to IP.
@@ -141,10 +143,11 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     // X-Forwarded-For): it is spoofable unless the trusted edge overwrites it.
     // Express resolves req.ip from trusted proxy hops via `trust proxy`.
     // The identity resolver also checks the signed bearer token because this
-    // global guard runs before route-level OptionalAuthGuard.
-    const identity = bearerIdentity(request);
-    const ip = identity ?? request.ip ?? request.socket?.remoteAddress ?? 'unknown';
-    const key = `${config.keyPrefix ?? 'global'}:${ip}`;
+    // global guard runs before route-level OptionalAuthGuard. The resolved IP
+    // is a mandatory floor: identity may narrow a bucket, never replace it.
+    const ip = request.ip ?? request.socket?.remoteAddress ?? 'unknown';
+    const identity = userIdentity(request);
+    const key = `${config.keyPrefix ?? 'global'}:${ip}:${identity ?? 'anon'}`;
 
     // parseInt yields NaN for malformed values; `|| 1` hides that but also
     // silently accepts negatives/fractionals. Clamp to a finite positive
