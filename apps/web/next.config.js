@@ -31,6 +31,12 @@ module.exports = {
         destination: `${INTERNAL_API_URL}/game/:path*`,
       },
       {
+        // socket.io-client uses /socket.io by default even when the namespace
+        // is /game; same-origin builds must proxy that handshake too.
+        source: '/socket.io/:path*',
+        destination: `${INTERNAL_API_URL}/socket.io/:path*`,
+      },
+      {
         source: '/avatars/:path*',
         destination: `${INTERNAL_API_URL}/avatars/:path*`,
       },
