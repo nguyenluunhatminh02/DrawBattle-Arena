@@ -32,7 +32,10 @@ test.describe('HTTP LAN canvas and touch-target regressions', () => {
       contentType: 'application/json',
       body: JSON.stringify({ challengeId: 'lan-test', word: 'con meo', timeLimit: 15 }),
     }));
-    await page.goto(`${WEB}/challenge/create`);
+    // Use the real home-page action so the guest token is persisted before
+    // the create page's hydration guard decides whether to redirect home.
+    await page.getByRole('button', { name: 'Thách bạn bè' }).click();
+    await page.waitForURL(/\/challenge\/create/, { timeout: 15000 });
     await page.waitForFunction(() => document.body.innerText.includes('Bắt đầu vẽ'), null, { timeout: 15000 });
     await page.getByRole('button', { name: 'Bắt đầu vẽ' }).click();
     const canvas = page.getByLabel('Khu vực vẽ thách thức');
