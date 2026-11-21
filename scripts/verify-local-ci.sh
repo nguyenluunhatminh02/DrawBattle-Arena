@@ -46,6 +46,34 @@ CI_URL="https://github.com/nguyenluunhatminh02/DrawBattle-Arena/actions"
 mkdir -p "$(dirname "$EVIDENCE_FILE")"
 : >"$EVIDENCE_FILE"
 
+REDACT_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/redact-secrets.XXXXXX.py")"
+cat > "$REDACT_SCRIPT" <<'PYEOF'
+import sys, re
+
+# Matches API_KEY, AUTH, TOKEN, SECRET, CREDENTIAL, SESSION and COOKIE in
+# camelCase, snake_case, kebab-case or bare form.
+SENSITIVE_KEY = r'(?:[A-Za-z_][A-Za-z0-9_.-]*?(?:TOKEN|PASSWORD|PASSWD|SECRET|API[_-]?KEY|AUTH|CREDENTIAL|SESSION|COOKIE)|(?:AUTH|SESSION|COOKIE|TOKEN|CREDENTIAL|API[_-]?KEY|PASSWORD|PASSWD|SECRET)[A-Za-z0-9_.-]*|[A-Za-z_][A-Za-z0-9_.-]*?KEY)'
+
+url_query_re = re.compile(r'(?i)([?&])' + SENSITIVE_KEY + r'=([^&\s"\'\)\]\}>]*)')
+inline_re = re.compile(r'(?i)(\b' + SENSITIVE_KEY + r'\s*=\s*)(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s,;}\]]+)')
+userinfo_re = re.compile(r'([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@')
+json_field_re = re.compile(r'(?i)(["\']' + SENSITIVE_KEY + r'["\']\s*:\s*)(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s,;}\]]+)')
+bearer_re = re.compile(r'(?i)(\bbearer\s+)([^\s"\',}\]]+)')
+word_secret_re = re.compile(r'(?i)\b(secret|token|password|passwd|api[_-]?key|credential|session|cookie)\s+([^\s,;}\]]+)')
+
+def redact(text):
+    text = userinfo_re.sub(r'\1<redacted>@', text)
+    text = url_query_re.sub(lambda m: m.group(1) + m.group(0)[len(m.group(1)):].split('=', 1)[0] + '=<redacted>', text)
+    text = inline_re.sub(r'\1<redacted>', text)
+    text = json_field_re.sub(r'\1<redacted>', text)
+    text = word_secret_re.sub(r'\1 <redacted>', text)
+    text = bearer_re.sub(r'\1<redacted>', text)
+    return text
+
+for line in sys.stdin:
+    sys.stdout.write(redact(line))
+PYEOF
+
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
@@ -89,20 +117,26 @@ mask() {
 }
 
 is_sensitive_env_name() {
-  case "$1" in
-    JWT_SECRET|DATABASE_URL|REDIS_URL|*TOKEN*|*PASSWORD*|*SECRET*) return 0 ;;
+  case "${1^^}" in
+    *JWT_SECRET|*DATABASE_URL|*REDIS_URL|*TOKEN*|*PASSWORD*|*PASSWD*|*SECRET*|*API_KEY*|*API-KEY*|*AUTH*|*CREDENTIAL*|*SESSION*|*COOKIE*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Redact userinfo (user:password@) from URLs anywhere in command output before
-# it is written to the evidence file.
-redact_output_line() {
-  sed -E 's#([[:alpha:]][[:alnum:]+.-]*://)[^/@[:space:]]+@#\1<redacted>@#g' <<<"$1"
+redact_line() {
+  python3 "$REDACT_SCRIPT" <<<"$1"
 }
 
-# Display-only copy of a command. Inline KEY=value arguments for sensitive keys
-# are replaced with KEY=<redacted>; the real "$@" is still executed unchanged.
+# Streaming filter for long-lived subprocesses (API/web startup logs).
+redact_subprocess_output() {
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    redact_line "$line" | tee -a "$EVIDENCE_FILE"
+  done
+}
+
+# Display-only copy of a command. Sensitive inline KEY=value arguments,
+# userinfo and secrets in URL query strings, JSON fields and bearer tokens are
+# replaced with <redacted>; the real "$@" is still executed unchanged.
 redact_command_display() {
   local arg name value
   local -a parts=()
@@ -113,38 +147,27 @@ redact_command_display() {
       if is_sensitive_env_name "$name"; then
         parts+=("$name=<redacted>")
       else
-        # Also scrub userinfo from URL-valued arguments such as SMOKE_API_URL.
-        if [[ "$value" == *://*@* ]]; then
-          value="$(redact_output_line "$value")"
-        fi
-        parts+=("$name=$value")
+        parts+=("$(redact_line "$arg")")
       fi
       continue
     fi
-    parts+=("$arg")
+    parts+=("$(redact_line "$arg")")
   done
   printf '%s' "${parts[*]}"
 }
 
+# Every subprocess output line passes through the same display filter before it
+# reaches stdout or the evidence file. The background process keeps the real
+# command's PID so its exit status is still reported accurately.
 run_step() {
-  local filter_output=0
-  if [[ "${1:-}" == "-filter" ]]; then
-    filter_output=1
-    shift
-  fi
   local name="$1"
   shift
   log ""
   log "=== $name ==="
   log "+ $(redact_command_display "$@")"
-  if (( filter_output )); then
-    "$@" 2>&1 | {
-      while IFS= read -r line || [[ -n "$line" ]]; do redact_output_line "$line"; done
-    } | tee -a "$EVIDENCE_FILE"
-  else
-    "$@" 2>&1 | tee -a "$EVIDENCE_FILE"
-  fi
-  local status="${PIPESTATUS[0]}"
+  "$@" > >(redact_subprocess_output) 2>&1 &
+  local status=0
+  wait "$!" || status=$?
   if (( status == 0 )); then
     record PASS "$name" "exit=0"
     return 0
@@ -173,15 +196,19 @@ cleanup() {
   log ""
   log "Cleanup: stopped locally started API/Web processes (if any)."
 }
-trap cleanup EXIT
+cleanup_and_remove_redactor() {
+  cleanup
+  rm -f "$REDACT_SCRIPT"
+}
+trap cleanup_and_remove_redactor EXIT
 
 log "DrawBattle local CI-equivalent verification"
 log "Started (UTC): $TIMESTAMP"
 log "Repository: $REPO_ROOT"
 log "Commit: $(git rev-parse HEAD 2>/dev/null || echo unavailable)"
 log "Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unavailable)"
-log "Node: $(node --version 2>/dev/null || echo unavailable)"
-log "pnpm: $PNPM ($($PNPM --version 2>/dev/null || echo unavailable))"
+log "Node: $(node --version 2>&1 | redact_line || echo unavailable)"
+log "pnpm: $PNPM ($($PNPM --version 2>&1 | redact_line || echo unavailable))"
 log "CI workflow: .github/workflows/ci.yml"
 log "CI run #51 (f67719e): $CI_URL/runs/44870295188"
 log "Evidence file: $EVIDENCE_FILE"
@@ -271,6 +298,15 @@ if is_set E2E_API_URL && is_set E2E_WEB_URL; then
     if is_set DATABASE_URL && is_set REDIS_URL; then
       log ""
       log "=== start-e2e-services ==="
+      # Startup logs are routed through the same redaction filter as all other
+      # subprocess output; the services themselves keep their real arguments.
+      log "+ $(redact_command_display env CI=true DATABASE_URL="$DATABASE_URL" \
+        REDIS_URL="$REDIS_URL" \
+        JWT_SECRET="${JWT_SECRET:-local-ci-secret-with-at-least-32-chars}" \
+        CORS_ORIGIN="$E2E_WEB_URL" \
+        PORT=3001 \
+        TRUST_PROXY=1 \
+        "$PNPM" --filter @drawbattle/api start)"
       env CI=true \
         DATABASE_URL="$DATABASE_URL" \
         REDIS_URL="$REDIS_URL" \
@@ -278,13 +314,18 @@ if is_set E2E_API_URL && is_set E2E_WEB_URL; then
         CORS_ORIGIN="$E2E_WEB_URL" \
         PORT=3001 \
         TRUST_PROXY=1 \
-        "$PNPM" --filter @drawbattle/api start >>"$EVIDENCE_FILE" 2>&1 &
+        "$PNPM" --filter @drawbattle/api start > >(redact_subprocess_output) 2>&1 &
       API_PID=$!
+      log "+ $(redact_command_display env CI=true \
+        NEXT_PUBLIC_API_URL="$E2E_API_URL" \
+        INTERNAL_API_URL="$E2E_API_URL" \
+        PORT=3002 \
+        "$PNPM" --filter @drawbattle/web start)"
       env CI=true \
         NEXT_PUBLIC_API_URL="$E2E_API_URL" \
         INTERNAL_API_URL="$E2E_API_URL" \
         PORT=3002 \
-        "$PNPM" --filter @drawbattle/web start >>"$EVIDENCE_FILE" 2>&1 &
+        "$PNPM" --filter @drawbattle/web start > >(redact_subprocess_output) 2>&1 &
       WEB_PID=$!
 
       # CI waits for API /api/flags and the web root before running Playwright.
@@ -320,9 +361,9 @@ if is_set E2E_API_URL && is_set E2E_WEB_URL; then
   fi
 
   run_step "playwright-e2e" env CI=true "$PNPM" --filter @drawbattle/web test:e2e || true
-  # The smoke script echoes its URLs; filter its output so credentials embedded
-  # in URL userinfo cannot leak into the shareable evidence file.
-  run_step -filter "post-deploy-smoke" env CI=true \
+  # run_step now filters every subprocess through the shared redactor, including
+  # the smoke script's echoed URLs and any JSON failure payloads it prints.
+  run_step "post-deploy-smoke" env CI=true \
     SMOKE_API_URL="$E2E_API_URL" \
     SMOKE_WEB_URL="$E2E_WEB_URL" \
     bash "$REPO_ROOT/scripts/smoke-test.sh" || true
