@@ -483,6 +483,63 @@ export class GameSocketGateway
   }
 
   /**
+   * A stale grace timer may have persisted a leave for a row that a newer
+   * socket already took over. Reactivate that row through the idempotent rejoin
+   * path: it returns immediately when the row is already active and only
+   * reactivates the same player's left row otherwise. Any failure is logged so
+   * the caller never masks the original timer outcome.
+   */
+  private async reactivateLeftDbRow(
+    socket: AuthedSocket,
+    roomId: string,
+    playerId: string,
+  ): Promise<void> {
+    const roomCode = socket.data.roomCode;
+    const nickname = socket.data.nickname;
+    if (!roomCode || !nickname) return;
+    try {
+      const rejoined = await this.roomService.joinRoom(
+        roomCode,
+        nickname,
+        socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
+        socket.data.identityType === 'user' ? socket.data.userId! : null,
+      );
+      if (rejoined.roomId !== roomId || rejoined.playerId !== playerId) {
+        this.logger.warn(`Could not reactivate superseded row for ${playerId}: wrong membership`);
+      }
+    } catch (err) {
+      this.logger.error(
+        'Failed to reactivate a superseded room player row',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  /**
+   * True when this attempt still owns the row it reactivated in the previous
+   * room. A concurrent kick (identity denylist) or a newer socket taking the
+   * slot must never be undone by the rollback of a failed rejoin.
+   */
+  private ownsRestoredDbRow(
+    socket: AuthedSocket,
+    roomId: string,
+    playerId: string,
+    attempt: JoinAttempt | undefined,
+    membershipBefore: ActiveMembership | undefined,
+  ): boolean {
+    if (!attempt || !attempt.dbRowOwned || attempt.socketId !== socket.id) return false;
+    if (this.getJoinAttempt(attempt.generation) !== attempt) return false;
+    const membership = this.getMembership(roomId, playerId);
+    if (membershipBefore && membership?.generation !== membershipBefore.generation) return false;
+    if (membership && membership.socketId !== socket.id) return false;
+    const registeredSocket = this.roomSockets.get(roomId)?.get(playerId);
+    if (registeredSocket && registeredSocket.id !== socket.id) return false;
+    const identity = socket.data.sessionId || socket.data.userId;
+    if (identity && this.kickedSessions.get(roomId)?.has(identity)) return false;
+    return true;
+  }
+
+  /**
    * Best-effort restoration after a failed destination join. Only the socket
    * that completed the old leave is allowed to reclaim that room; a newer
    * replacement keeps its slot. Any in-memory result is rolled back if the
@@ -501,6 +558,12 @@ export class GameSocketGateway
     }
     const nickname = socket.data.nickname;
     if (!nickname) return false;
+    const attempt = this.getJoinAttempt(attemptGeneration);
+    if (!attempt) return false;
+    const membershipBefore = this.getMembership(roomId, playerId);
+    // Mark ownership before the DB await so a rollback can never release a row
+    // that a concurrent leave/kick already took away from this attempt.
+    attempt.dbRowOwned = true;
     try {
       const rejoined = await this.roomService.joinRoom(
         roomCode ?? '',
@@ -512,6 +575,11 @@ export class GameSocketGateway
       if (socket.disconnected) return false;
       if (rejoined.roomId !== roomId || rejoined.playerId !== playerId) {
         throw new Error('Rejoin returned a different membership');
+      }
+      // A newer socket may have claimed this slot while the rejoin was in
+      // flight. Never revoke it or roll back its row from this older attempt.
+      if (!this.ownsRestoredDbRow(socket, roomId, playerId, attempt, membershipBefore)) {
+        return false;
       }
       const existing = this.roomSockets.get(roomId)?.get(playerId);
       if (existing && existing.id !== socket.id) {
@@ -527,17 +595,19 @@ export class GameSocketGateway
         generation: attemptGeneration,
         joinedPlayer: player,
       });
+      attempt.dbRowOwned = false;
       return true;
     } catch (err) {
       this.logger.error(
         'Failed to restore previous room after aborted switch',
         err instanceof Error ? err.message : String(err),
       );
-      // Roll back only a row this attempt still owns. A newer attempt may have
-      // restored or replaced this slot while the rejoin was in flight.
-      if (this.getJoinAttempt(attemptGeneration)) {
+      // Roll back only the row this attempt reactivated and still owns. A newer
+      // attempt, a kick or a concurrent leave must not have its slot released.
+      if (this.ownsRestoredDbRow(socket, roomId, playerId, attempt, membershipBefore)) {
         try {
           await this.roomService.leaveRoom(roomId, playerId);
+          attempt.dbRowOwned = false;
         } catch (rollbackErr) {
           this.logger.error(
             'Failed to roll back restored room membership',
@@ -608,12 +678,28 @@ export class GameSocketGateway
       }
       this.broadcastRoomUpdate(roomId);
       const timer = setTimeout(async () => {
+        // A reconnect may have already replaced this socket before the timer
+        // callback started. Never persist a leave for a row that now belongs
+        // to a newer socket - the DB write would mark the winner's row left.
+        const beforeMembership = this.getMembership(roomId, playerId);
+        if (
+          (beforeMembership && (beforeMembership.socketId !== ownerSocketId ||
+            (generation !== undefined && beforeMembership.generation !== generation))) ||
+          this.disconnectTimers.get(playerId) !== current
+        ) {
+          if (current === this.disconnectTimers.get(playerId)) {
+            this.disconnectTimers.delete(playerId);
+          }
+          return;
+        }
         // Persist the departure before freeing the slot. Without this the
         // player keeps leftAt=null in DB, occupies a slot forever and can
         // rejoin a password-protected room without supplying the password.
+        let leaveFailed = false;
         try {
           await this.roomService.leaveRoom(roomId, playerId);
         } catch (err) {
+          leaveFailed = true;
           this.logger.error(
             'Failed to persist player departure',
             err instanceof Error ? err.message : String(err),
@@ -621,13 +707,18 @@ export class GameSocketGateway
         }
         // Re-check after every await. A reconnect may have installed a new
         // socket (and generation) while leaveRoom was in flight; only the
-        // timer's original owner may complete the eviction.
+        // timer's original owner may complete the eviction. If the leave
+        // committed for a row a newer socket took over, reactivate that row
+        // instead of leaving the winner soft-deleted in the DB.
         const currentMembership = this.getMembership(roomId, playerId);
         if (
           (currentMembership && (currentMembership.socketId !== ownerSocketId ||
             (generation !== undefined && currentMembership.generation !== generation))) ||
           this.disconnectTimers.get(playerId) !== current
         ) {
+          if (!leaveFailed) {
+            await this.reactivateLeftDbRow(socket, roomId, playerId);
+          }
           return;
         }
         this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, playerId));
@@ -1136,6 +1227,14 @@ export class GameSocketGateway
     switch (data.action) {
       case 'kick': {
         const targetSocket = this.roomSockets.get(roomId)?.get(data.targetId);
+        // Capture the exact socket and membership generation being kicked
+        // before any await. A slow banPlayer must not cancel a grace timer
+        // installed by a newer replacement socket for the same player. For an
+        // already-disconnected target the pending timer is the ownership token.
+        const kickedTimer = this.disconnectTimers.get(data.targetId);
+        const kickedSocketId = targetSocket?.id ?? kickedTimer?.socketId;
+        const kickedGeneration =
+          this.getMembership(roomId, data.targetId)?.generation ?? kickedTimer?.generation;
         // Authorize the kick without mutating in-memory state first. A forged
         // or stale hostAction must never create a DB ban, and the target must
         // remain in the room until the ban is durably persisted.
@@ -1169,25 +1268,37 @@ export class GameSocketGateway
         if (banned.guestSessionId || banned.userId) {
           this.kickedSessions.set(roomId, denylist);
         }
-        // The ban is durable, so it is now safe to remove the player from the
-        // in-memory room. This also emits room:playerKicked to the target.
-        this.game.kickPlayer(roomId, playerId, data.targetId);
-        this.clearDisconnectTimer(roomId, data.targetId);
-        this.roomSockets.get(roomId)?.delete(data.targetId);
-        if (targetSocket) {
-          targetSocket.leave(roomId);
-          targetSocket.emit('room:kicked', { roomCode: socket.data.roomCode });
-          targetSocket.data.roomId = undefined;
-          targetSocket.data.roomCode = undefined;
-          targetSocket.data.playerId = undefined;
-        }
-        try {
-          await this.roomService.leaveRoom(roomId, data.targetId);
-        } catch (err) {
-          this.logger.error(
-            'Failed to persist kicked player',
-            err instanceof Error ? err.message : String(err),
-          );
+        // Only cancel a timer (and evict a socket) that still belongs to the
+        // socket kicked when this action started. A replacement that reconnected
+        // during banPlayer keeps its grace period and its room membership.
+        const currentTargetSocket = this.roomSockets.get(roomId)?.get(data.targetId);
+        const currentTargetMembership = this.getMembership(roomId, data.targetId);
+        const timerStillOwned =
+          (!kickedSocketId || currentTargetSocket?.id === kickedSocketId) &&
+          (!kickedGeneration ||
+            (currentTargetMembership && currentTargetMembership.generation === kickedGeneration));
+        if (timerStillOwned) {
+          // The ban is durable, so it is now safe to remove the player from the
+          // in-memory room. This also emits room:playerKicked to the target.
+          this.game.kickPlayer(roomId, playerId, data.targetId);
+          this.clearDisconnectTimer(roomId, data.targetId, kickedSocketId, kickedGeneration);
+          this.roomSockets.get(roomId)?.delete(data.targetId);
+          this.activeMemberships.delete(GameSocketGateway.membershipKey(roomId, data.targetId));
+          if (targetSocket) {
+            targetSocket.leave(roomId);
+            targetSocket.emit('room:kicked', { roomCode: socket.data.roomCode });
+            targetSocket.data.roomId = undefined;
+            targetSocket.data.roomCode = undefined;
+            targetSocket.data.playerId = undefined;
+          }
+          try {
+            await this.roomService.leaveRoom(roomId, data.targetId);
+          } catch (err) {
+            this.logger.error(
+              'Failed to persist kicked player',
+              err instanceof Error ? err.message : String(err),
+            );
+          }
         }
         this.broadcastRoomUpdate(roomId);
         break;
