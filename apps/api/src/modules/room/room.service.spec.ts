@@ -138,3 +138,66 @@ describe('RoomService.joinRoom', () => {
     expect(transactional).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('RoomService.leaveRoom', () => {
+  const makeTx = () => ({
+    roomPlayer: {
+      update: jest.fn().mockResolvedValue({ id: 'player-1' }),
+      count: jest.fn().mockResolvedValue(0),
+    },
+    room: { update: jest.fn().mockResolvedValue({ id: 'room-1' }) },
+  });
+
+  it('commits the leftAt update, recount and empty-room reset in one transaction', async () => {
+    const tx = makeTx();
+    const prisma = { $transaction: jest.fn(fn => fn(tx)) } as any;
+    const service = new RoomService(prisma);
+
+    await expect(service.leaveRoom('room-1', 'player-1')).resolves.toEqual({ activeCount: 0 });
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(tx.roomPlayer.update).toHaveBeenCalledWith({
+      where: { id: 'player-1', roomId: 'room-1' },
+      data: { leftAt: expect.any(Date) },
+    });
+    expect(tx.roomPlayer.count).toHaveBeenCalledWith({ where: { roomId: 'room-1', leftAt: null } });
+    expect(tx.room.update).toHaveBeenCalledWith({
+      where: { id: 'room-1' },
+      data: { status: 'WAITING', hostPlayerId: null },
+    });
+  });
+
+  it('rolls back all writes when any step rejects', async () => {
+    const tx = makeTx();
+    tx.room.update.mockRejectedValue(new Error('db down'));
+    // Simulate Prisma's transactional rollback by rejecting the whole callback.
+    const prisma = {
+      $transaction: jest.fn(async fn => {
+        try {
+          return await fn(tx);
+        } catch (err) {
+          throw err;
+        }
+      }),
+    } as any;
+    const service = new RoomService(prisma);
+
+    await expect(service.leaveRoom('room-1', 'player-1')).rejects.toThrow('db down');
+    expect(tx.roomPlayer.update).toHaveBeenCalledTimes(1);
+    expect(tx.room.update).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a P2034 conflict for leaveRoom', async () => {
+    const tx = makeTx();
+    const conflict = Object.assign(new Error('write conflict'), { code: 'P2034' });
+    const transactional = jest
+      .fn()
+      .mockRejectedValueOnce(conflict)
+      .mockImplementation(fn => fn(tx));
+    const service = new RoomService({ $transaction: transactional } as any);
+
+    await expect(service.leaveRoom('room-1', 'player-1')).resolves.toEqual({ activeCount: 0 });
+    expect(transactional).toHaveBeenCalledTimes(2);
+  });
+});

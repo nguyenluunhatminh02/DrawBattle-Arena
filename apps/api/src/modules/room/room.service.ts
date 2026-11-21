@@ -335,21 +335,34 @@ export class RoomService {
     return { userId: player.userId, guestSessionId: player.guestSessionId };
   }
 
+  /**
+   * A leave is a single durable transition: marking the player as left,
+   * recounting active members and resetting an empty room must all commit
+   * together. A rejected write therefore never leaves a room half-updated.
+   */
   async leaveRoom(roomId: string, playerId: string) {
-    await this.prisma.roomPlayer.update({
-      where: { id: playerId },
-      data: { leftAt: new Date() },
-    });
-    const activeCount = await this.prisma.roomPlayer.count({
-      where: { roomId, leftAt: null },
-    });
-    if (activeCount === 0) {
-      await this.prisma.room.update({
-        where: { id: roomId },
-        data: { status: 'WAITING', hostPlayerId: null },
-      });
-    }
-    return { activeCount };
+    return withSerializableRetry(() =>
+      this.prisma.$transaction(async tx => {
+        await tx.roomPlayer.update({
+          where: { id: playerId, roomId },
+          data: { leftAt: new Date() },
+        });
+        const activeCount = await tx.roomPlayer.count({
+          where: { roomId, leftAt: null },
+        });
+        if (activeCount === 0) {
+          await tx.room.update({
+            where: { id: roomId },
+            data: { status: 'WAITING', hostPlayerId: null },
+          });
+        }
+        return { activeCount };
+      }, {
+        isolationLevel: 'Serializable',
+        maxWait: 5000,
+        timeout: 10000,
+      }),
+    );
   }
 
   async updateHost(roomId: string, hostPlayerId: string) {
