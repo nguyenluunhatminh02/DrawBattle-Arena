@@ -446,6 +446,7 @@ export class GameStateService {
       // Prepare everything that can fail before persisting PLAYING, so an init
       // failure never leaves the room PLAYING in the DB but WAITING in memory.
       let nextMatch: MatchState;
+      let wordOptions: Awaited<ReturnType<WordService['pickRandomWords']>>;
       try {
         let turnDuration =
           room.settings.mode === 'SPEED' || room.settings.mode === 'DUEL'
@@ -481,6 +482,10 @@ export class GameStateService {
           enableHints,
           startedAt: Date.now(),
         };
+        wordOptions = await this.wordService.pickRandomWords(3, {
+          difficulty: room.settings.difficulty,
+          category: room.settings.category,
+        });
       } catch (err) {
         this.logger.error(`startMatch init failed for ${roomId}`, err instanceof Error ? err.message : String(err));
         return false;
@@ -499,25 +504,6 @@ export class GameStateService {
           `startMatch aborted for ${roomId}: status write failed`,
           err instanceof Error ? err.message : String(err),
         );
-        return false;
-      }
-
-      try {
-        await this.startWordPickPhase(roomId);
-      } catch (err) {
-        // PLAYING is already in the DB: compensate rather than leaving a
-        // phantom PLAYING room with no match state. Awaiting keeps the rollback
-        // ordered ahead of a subsequent rematch's status writes.
-        room.match = null;
-        this.logger.error(`startMatch word pick setup failed for ${roomId}`, err instanceof Error ? err.message : String(err));
-        try {
-          await this.writeRoomStatus(roomId, 'WAITING');
-        } catch (rollbackErr) {
-          this.logger.error(
-            `startMatch failed to roll back status for ${roomId}`,
-            rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-          );
-        }
         return false;
       }
 
@@ -551,12 +537,33 @@ export class GameStateService {
         payload: { matchId, round: 1, totalRounds: rounds, drawerOrder: drawerOrder.map((id: string) => ({ id, nickname: room.players.get(id)?.nickname || '?' })) },
       });
 
-      await this.startWordPickPhase(roomId);
+      try {
+        await this.startWordPickPhase(roomId, wordOptions);
+      } catch (err) {
+        // PLAYING is already in the DB: compensate rather than leaving a
+        // phantom PLAYING room with no match state. Awaiting keeps the rollback
+        // ordered ahead of a subsequent rematch's status writes.
+        room.match = null;
+        this.logger.error(`startMatch word pick setup failed for ${roomId}`, err instanceof Error ? err.message : String(err));
+        try {
+          await this.writeRoomStatus(roomId, 'WAITING');
+        } catch (rollbackErr) {
+          this.logger.error(
+            `startMatch failed to roll back status for ${roomId}`,
+            rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          );
+        }
+        return false;
+      }
+
       return true;
     });
   }
 
-  private async startWordPickPhase(roomId: string) {
+  private async startWordPickPhase(
+    roomId: string,
+    prefetchedOptions?: Awaited<ReturnType<WordService['pickRandomWords']>>,
+  ) {
     const room = this.rooms.get(roomId);
     if (!room || !room.match) return;
 
@@ -575,10 +582,12 @@ export class GameStateService {
       void this.endMatch(roomId);
       return;
     }
-    const options = await this.wordService.pickRandomWords(3, {
-      difficulty: room.settings.difficulty,
-      category: room.settings.category,
-    });
+    const options =
+      prefetchedOptions ??
+      (await this.wordService.pickRandomWords(3, {
+        difficulty: room.settings.difficulty,
+        category: room.settings.category,
+      }));
     if (!this.rooms.get(roomId)?.match) return;
 
     const modeConfig = getModeConfig(room.settings.mode || 'CLASSIC');

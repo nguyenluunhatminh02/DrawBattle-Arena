@@ -257,9 +257,22 @@ describe('GameStateService room status persistence', () => {
     expect(roomUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it('rolls back to WAITING when word pick setup fails after PLAYING was persisted', async () => {
+  it('does not write PLAYING when word prefetch fails during init', async () => {
     jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
     pickRandomWords.mockRejectedValueOnce(new Error('word service down'));
+
+    await expect(service.startMatch(roomId)).resolves.toBe(false);
+    expect(roomUpdate).not.toHaveBeenCalled();
+    expect((service as any).rooms.get(roomId).match).toBeNull();
+  });
+
+  it('rolls back to WAITING when word pick setup fails after PLAYING was persisted', async () => {
+    jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+    // Fail only during the post-PLAYING word pick phase (match:started must
+    // still be emitted so that the compensation path is the one under test).
+    service.registerSink(roomId, (event: RoomEvent) => {
+      if (event.type === 'turn:youAreDrawer') throw new Error('sink down');
+    });
 
     await expect(service.startMatch(roomId)).resolves.toBe(false);
     expect(roomUpdate).toHaveBeenNthCalledWith(1, {
