@@ -204,8 +204,8 @@ sequenceDiagram
   B->>API: POST /api/replays/:id/render (throttled 3/min)
   API->>DB: upsert durable render_jobs row (migration 20261123)
   API->>W: queue worker (max 3 concurrent, 60 s timeout; stale leases requeued)
-  W->>W: render 640x400 GIF at 10 fps to public/replays
-  W->>DB: replay.gifUrl = /replays/<id>.gif
+  W->>W: render 640x400 GIF at 10 fps to private-replays volume
+  W->>DB: replay.gifUrl = /api/replays/file/<id>.gif
   Solver->>API: POST /api/challenges/:id/guesses {answer}
   API->>DB: pg_advisory_xact_lock(challengeId); count attempts, TTL, replay present
   alt correct or out of attempts

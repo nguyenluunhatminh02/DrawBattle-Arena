@@ -69,7 +69,7 @@ describe('render job state machine', () => {
     expect(exhausted).toMatchObject({ state: 'failed', attempts: MAX_RENDER_ATTEMPTS });
 
     // A retry must not requeue the exhausted job or reset its attempts.
-    expect(await store.retryNow(created.id, now)).toBeNull();
+    expect(await store.retryMissingArtifact(created.id, now)).toBeNull();
     expect(await store.findById(created.id)).toMatchObject({
       state: 'failed',
       attempts: MAX_RENDER_ATTEMPTS,
@@ -111,7 +111,7 @@ describe('render job state machine', () => {
     expect(retry?.lockedBy).toBe('worker-b');
   });
 
-  it('recovers an abandoned lease and moves it back to queued', async () => {
+  it('recovers an abandoned lease with bounded backoff and no fresh attempt budget', async () => {
     const store = new InMemoryJobStore();
     const created = await store.create('replay-1', now);
     await store.markRunning(created.id, 'crashed-worker', now);
@@ -120,8 +120,16 @@ describe('render job state machine', () => {
     const later = new Date(now.getTime() + RUNNING_LEASE_MS + 1);
     expect(await store.recoverStale(later)).toBe(1);
     const recovered = await store.findById(created.id);
-    expect(recovered).toMatchObject({ state: 'queued', lockedBy: null, lockedAt: null });
-    expect((await store.claimNext('healthy-worker', later))?.id).toBe(created.id);
+    expect(recovered).toMatchObject({
+      state: 'queued',
+      attempts: 1,
+      lockedBy: null,
+      lockedAt: null,
+    });
+    expect(await store.claimNext('healthy-worker', later)).toBeNull();
+    expect((await store.claimNext('healthy-worker', new Date(later.getTime() + 30_000)))?.id).toBe(
+      created.id,
+    );
   });
 
   it('ignores success from a stale worker after a lease was reclaimed', async () => {
@@ -130,9 +138,10 @@ describe('render job state machine', () => {
     await store.markRunning(created.id, 'worker-a', now);
     const later = new Date(now.getTime() + RUNNING_LEASE_MS + 1);
     await store.recoverStale(later);
-    await store.markRunning(created.id, 'worker-b', later);
+    const afterBackoff = new Date(later.getTime() + 30_000);
+    await store.markRunning(created.id, 'worker-b', afterBackoff);
 
-    expect(await store.succeed(created.id, 'worker-b', later)).toMatchObject({ state: 'completed' });
+    expect(await store.succeed(created.id, 'worker-b', afterBackoff)).toMatchObject({ state: 'completed' });
     expect(await store.fail(created.id, 'worker-b', 'late failure', later)).toBeNull();
   });
 
@@ -142,12 +151,13 @@ describe('render job state machine', () => {
     await store.markRunning(created.id, 'worker-a', now);
     const later = new Date(now.getTime() + RUNNING_LEASE_MS + 1);
     await store.recoverStale(later);
-    await store.markRunning(created.id, 'worker-b', later);
+    const afterBackoff = new Date(later.getTime() + 30_000);
+    await store.markRunning(created.id, 'worker-b', afterBackoff);
 
     expect(await store.succeed(created.id, 'worker-a', later)).toBeNull();
     expect(await store.fail(created.id, 'worker-a', 'late failure', later)).toBeNull();
     expect(await store.findById(created.id)).toMatchObject({ state: 'running', lockedBy: 'worker-b' });
-    expect(await store.succeed(created.id, 'worker-b', later)).toMatchObject({ state: 'completed' });
+    expect(await store.succeed(created.id, 'worker-b', afterBackoff)).toMatchObject({ state: 'completed' });
   });
 });
 

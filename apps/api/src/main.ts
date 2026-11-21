@@ -44,10 +44,22 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
   // Replay GIFs are private and streamed by the guarded file route. Block the
   // legacy /replays/<id>.gif static path so it cannot bypass visibility checks.
+  // The guard must match both /replays and /replays/ to prevent encoded-path
+  // bypasses (e.g. /replays%2fx.gif) from falling through to static serving.
   app.use('/replays', (_req: Request, res: Response) =>
     res.status(404).json({ message: 'Not Found' }),
   );
-  app.useStaticAssets(join(process.cwd(), 'public'), { prefix: '/', index: false });
+  app.use('/replays/', (_req: Request, res: Response) =>
+    res.status(404).json({ message: 'Not Found' }),
+  );
+  // Serve only the avatars directory statically. Do NOT serve the entire public
+  // root: any file placed there (including legacy replay GIFs) would bypass
+  // the visibility guard. The private-replays directory holds rendered GIFs
+  // and is served only through the guarded /api/replays/file/:id.gif route.
+  app.useStaticAssets(join(process.cwd(), 'public', 'avatars'), {
+    prefix: '/avatars/',
+    index: false,
+  });
 
   const port = process.env.PORT || 3001;
   await app.listen(port);

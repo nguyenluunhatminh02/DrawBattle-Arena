@@ -163,7 +163,7 @@ describe('ReplayService visibility (P1-01)', () => {
     await expect(service.getRenderStatus('replay-1')).resolves.toEqual({ status: 'completed' });
   });
 
-  it('enforces visibility on the GIF read path and returns a guarded URL', async () => {
+  it('enforces visibility before streaming from the guarded GIF path', async () => {
     const { service, prisma, jobs, roomPlayerFindFirst } = createService();
     prisma.replay.findUnique.mockResolvedValue(replayWithVisibility('PRIVATE'));
     jobs.getJobByReplay.mockResolvedValue(null);
@@ -173,9 +173,13 @@ describe('ReplayService visibility (P1-01)', () => {
     expect(jobs.assertRendered).not.toHaveBeenCalled();
 
     roomPlayerFindFirst.mockResolvedValue({ id: 'room-player-1' });
-    await expect(service.getGif('replay-1', { authorization: bearer('user') })).resolves.toBe(
-      '/api/replays/file/replay-1.gif',
+    // The authorized path streams the file directly: a 302 redirect to
+    // /api/replays/file/... would drop Authorization and ?share and break
+    // UNLISTED/PRIVATE reads. Missing files fail closed with 404.
+    await expect(service.getGif('replay-1', { authorization: bearer('user') })).rejects.toBeInstanceOf(
+      NotFoundException,
     );
+    expect(jobs.assertRendered).toHaveBeenCalled();
   });
 
   it('requires authorization before queueing a render (P2-03)', async () => {

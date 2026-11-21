@@ -1,5 +1,8 @@
 import { ConflictException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
+import { replayFilenameFromPointer, replayRenderDir } from './replay-paths';
 
 export const RENDER_STATES = ['queued', 'running', 'completed', 'failed'] as const;
 export type RenderState = (typeof RENDER_STATES)[number];
@@ -108,7 +111,10 @@ interface JobStore {
   /** `holder` is the fencing token from the successful claim: only the current lock owner may finish it. */
   succeed(jobId: string, holder: string, now: Date): Promise<RenderJobRecord | null>;
   fail(jobId: string, holder: string, error: string, now: Date): Promise<RenderJobRecord | null>;
-  retryNow(jobId: string, now: Date): Promise<RenderJobRecord | null>;
+  /** Bounded requeue for a completed job whose GIF artifact was lost from disk. */
+  retryMissingArtifact(jobId: string, now: Date): Promise<RenderJobRecord | null>;
+  /** Requeue expired leases while consuming an attempt from the original budget. */
+  recoverStale(now: Date): Promise<number>;
   pendingCount(): Promise<number>;
 }
 
@@ -205,13 +211,15 @@ export class InMemoryJobStore implements JobStore {
     return updated;
   }
 
-  async retryNow(jobId: string, now: Date) {
+  async retryMissingArtifact(jobId: string, now: Date) {
     const job = this.jobs.get(jobId);
-    if (!job || job.state !== 'failed' || job.attempts >= job.maxAttempts) return null;
+    if (!job || job.state !== 'completed' || job.attempts >= job.maxAttempts) return null;
     const updated: RenderJobRecord = {
       ...job,
       state: 'queued',
-      error: null,
+      // A rebuild consumes one attempt from the ORIGINAL budget; no reset.
+      attempts: job.attempts + 1,
+      error: 'Rendered GIF artifact missing; rebuilding',
       nextAttemptAt: now,
       lockedBy: null,
       lockedAt: null,
@@ -229,19 +237,14 @@ export class InMemoryJobStore implements JobStore {
     return count;
   }
 
-  /** Requeue running jobs whose worker lease expired without a result. */
+  /** Requeue running jobs whose worker lease expired, consuming one attempt. */
   async recoverStale(now: Date = new Date()) {
     const cutoff = new Date(now.getTime() - RUNNING_LEASE_MS);
     let recovered = 0;
     for (const job of this.jobs.values()) {
       if (!isLeaseExpired(job, now) || !job.lockedAt || job.lockedAt > cutoff) continue;
-      this.jobs.set(job.id, {
-        ...job,
-        state: 'queued',
-        lockedBy: null,
-        lockedAt: null,
-        updatedAt: now,
-      });
+      const transition = failureTransition(job, 'Worker lease expired', now);
+      this.jobs.set(job.id, { ...job, ...transition, updatedAt: now });
       recovered++;
     }
     return recovered;
@@ -380,12 +383,16 @@ export class PrismaJobStore implements JobStore {
     return updated.count > 0 ? this.findById(jobId) : null;
   }
 
-  async retryNow(jobId: string, now: Date) {
+  async retryMissingArtifact(jobId: string, now: Date) {
+    // Atomic compare-and-set: only a completed job with budget left can be
+    // rebuilt. Concurrent reconciliation calls cannot both requeue the same
+    // job, and attempts are never reset.
     const updated = await this.prisma.renderJob.updateMany({
-      where: { id: jobId, state: 'failed', attempts: { lt: MAX_RENDER_ATTEMPTS } },
+      where: { id: jobId, state: 'completed', attempts: { lt: MAX_RENDER_ATTEMPTS } },
       data: {
         state: 'queued',
-        error: null,
+        attempts: { increment: 1 },
+        error: 'Rendered GIF artifact missing; rebuilding',
         nextAttemptAt: now,
         lockedBy: null,
         lockedAt: null,
@@ -393,6 +400,30 @@ export class PrismaJobStore implements JobStore {
       },
     });
     return updated.count > 0 ? this.findById(jobId) : null;
+  }
+
+  async recoverStale(now: Date = new Date()) {
+    const staleCutoff = new Date(now.getTime() - RUNNING_LEASE_MS);
+    const stale = await this.prisma.renderJob.findMany({
+      where: { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
+      select: { id: true, attempts: true, maxAttempts: true },
+    });
+    let recovered = 0;
+    for (const job of stale) {
+      const transition = failureTransition(
+        { attempts: job.attempts, maxAttempts: job.maxAttempts },
+        'Worker lease expired',
+        now,
+      );
+      // A single guarded UPDATE per job: the previous owner's late succeed()
+      // cannot win after this fence, and an exhausted lease ends terminal.
+      const result = await this.prisma.renderJob.updateMany({
+        where: { id: job.id, state: 'running', lockedAt: { not: null, lte: staleCutoff } },
+        data: { ...transition, updatedAt: now },
+      });
+      recovered += result.count;
+    }
+    return recovered;
   }
 
   async pendingCount() {
@@ -440,10 +471,10 @@ export class ReplayJobService {
     if (!job) job = await this.store.create(replayId, now);
     if (job.state === 'completed') return { jobId: job.id, status: 'completed' };
     if (job.state === 'failed') {
-      // Failed is terminal once the original attempt budget is exhausted.
-      // A retry may only requeue within that budget; it must never reset attempts.
-      const retried = await this.store.retryNow(job.id, now);
-      return { jobId: job.id, status: retried?.state ?? job.state };
+      // A failed job is terminal. Its budget is exhausted by definition (see
+      // failureTransition); the only bounded repair path is a missing artifact
+      // on a completed job, handled by the reconciliation worker.
+      return { jobId: job.id, status: 'failed' };
     }
     if (job.state === 'running' && !isLeaseExpired(job, now)) {
       throw new ConflictException({
@@ -514,17 +545,29 @@ export class ReplayJobService {
     return base;
   }
 
+  /**
+   * Requeue a COMPLETED job whose GIF artifact was lost. The retry consumes an
+   * attempt from the original budget; exhausted jobs stay terminal so the
+   * minute cron can never enter an infinite rebuild loop.
+   */
+  async retryMissingArtifact(replayId: string, gifUrl: string): Promise<boolean> {
+    const job = await this.store.findByReplay(replayId);
+    if (!job || job.state !== 'completed' || job.attempts >= job.maxAttempts) return false;
+    const retried = await this.store.retryMissingArtifact(job.id, new Date());
+    if (!retried) return false;
+    // Clear the dangling pointer only if it has not been replaced by a
+    // concurrent render. updateMany avoids a P2025 race and keeps outcomes
+    // consistent: a fresh pointer from another worker is left untouched.
+    await this.prisma.replay.updateMany({
+      where: { id: replayId, gifUrl },
+      data: { gifUrl: null },
+    });
+    return true;
+  }
+
   /** Ejects jobs stuck in a running state after a crashed worker. */
   async recoverStale(now: Date = new Date()) {
-    if (this.store instanceof PrismaJobStore) {
-      const staleCutoff = new Date(now.getTime() - RUNNING_LEASE_MS);
-      await this.prisma.renderJob.updateMany({
-        where: { state: 'running', lockedAt: { not: null, lte: staleCutoff } },
-        data: { state: 'queued', lockedBy: null, lockedAt: null, updatedAt: now },
-      });
-      return;
-    }
-    await (this.store as InMemoryJobStore).recoverStale(now);
+    await this.store.recoverStale(now);
   }
 
   async pendingCount() {
@@ -535,9 +578,23 @@ export class ReplayJobService {
     return this.store.findByReplay(replayId);
   }
 
-  /** GoneException distinguishes "not rendered yet" from a missing replay. */
-  assertRendered(replay: { gifUrl: string | null }, job: RenderJobRecord | null) {
-    if (replay.gifUrl) return replay.gifUrl;
+  /**
+   * GoneException distinguishes "not rendered yet" from a missing replay.
+   * A non-null pointer is not enough: the artifact must exist on disk or the
+   * caller would follow a dangling URL. Missing artifacts are requeued by the
+   * reconciliation worker within the job's remaining attempt budget.
+   */
+  assertRendered(
+    replay: { id?: string; gifUrl: string | null },
+    job: RenderJobRecord | null,
+  ) {
+    if (replay.gifUrl) {
+      const filename = replay.id
+        ? replayFilenameFromPointer(replay.gifUrl, replay.id)
+        : null;
+      if (filename && existsSync(join(replayRenderDir(), filename))) return replay.gifUrl;
+      throw new GoneException('Rendered GIF artifact is unavailable');
+    }
     if (job?.state === 'failed') throw new GoneException('Render failed permanently');
     throw new GoneException({
       message: 'GIF not yet rendered',

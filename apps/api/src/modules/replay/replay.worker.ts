@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { writeFile, mkdir, unlink, rename, readdir } from 'fs/promises';
@@ -7,10 +7,12 @@ import { Worker } from 'worker_threads';
 import { existsSync } from 'fs';
 import { RenderJobRecord, ReplayJobService } from './replay-jobs';
 import {
+  REPLAY_FILE_PREFIX,
   REPLAY_STATIC_PREFIX,
   replayFileUrl,
   replayGifFilename,
   replayRenderDir,
+  replayLegacyRenderDir,
   replayFilenameFromPointer,
 } from './replay-paths';
 
@@ -21,12 +23,18 @@ const DEFAULT_CLEANUP_MAX_AGE_DAYS = 30;
 const SHUTDOWN_ERROR = 'Replay worker shut down during render';
 
 @Injectable()
-export class ReplayWorker implements OnModuleDestroy {
+export class ReplayWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ReplayWorker.name);
   private readonly renderDir = replayRenderDir();
-  private readonly legacyRenderDir = join(process.cwd(), 'public', 'replays');
+  private readonly legacyRenderDir = replayLegacyRenderDir();
   private readonly activeJobs = new Map<string, Promise<void>>();
   private readonly activeWorkers = new Map<string, Worker>();
+  /** Job ids whose render has settled; late worker messages must not write for them. */
+  private readonly settledJobs = new Set<string>();
+  /** Primary-key cursor for the bounded legacy migration scan. */
+  private legacyCursor: string | null = null;
+  /** Primary-key cursor for the bounded missing-artifact reconciliation scan. */
+  private reconcileCursor: string | null = null;
   private readonly MAX_CONCURRENT = 3;
   private shuttingDown = false;
 
@@ -34,6 +42,29 @@ export class ReplayWorker implements OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly jobs: ReplayJobService,
   ) {}
+
+  /**
+   * Closing the legacy public GIF path is a startup requirement, not a
+   * best-effort cron: until migration succeeds, any static misconfiguration
+   * could expose the files. Failure is logged loudly and the minute cron
+   * retries, but the server is allowed to boot so DB outages do not take down
+   * unrelated routes.
+   */
+  async onModuleInit() {
+    try {
+      const result = await this.migrateLegacyPublicGifs();
+      if (result.migrated || result.removed || result.cleared) {
+        this.logger.log(
+          `Legacy replay GIF migration: ${result.migrated} migrated, ${result.removed} removed, ${result.cleared} pointers cleared`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        'Startup migration of legacy public replay GIFs failed; will retry on the next cron tick',
+        err instanceof Error ? err.stack ?? err.message : String(err),
+      );
+    }
+  }
 
   /**
    * Public queue path. The job service only enqueues; this worker claims and
@@ -68,21 +99,32 @@ export class ReplayWorker implements OnModuleDestroy {
 
   /**
    * Backfill replays created before render jobs were introduced (or whose job
-   * row was lost). Only rows with no GIF and no job are eligible, and the batch
-   * is capped so a large backlog cannot monopolise a cron tick.
+   * row was lost), and repair completed jobs whose GIF file is missing (e.g.
+   * after a volume restore). A cursor keeps each cron pass bounded while still
+   * reaching old rows even when new pointers are written continuously.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcileMissingRenderJobs() {
     if (this.shuttingDown || !this.prisma.hasOptionalTable('renderJob')) return 0;
 
-    let pending: { id: string }[] = [];
+    let rows: { id: string; gifUrl: string | null }[] = [];
     try {
-      pending = await this.prisma.replay.findMany({
-        where: { gifUrl: null, renderJob: null },
-        select: { id: true },
-        orderBy: { createdAt: 'asc' },
+      // Ordered by primary key with a persistent cursor: new rows cannot
+      // starve old ones, and each cron tick visits at most one bounded page.
+      rows = await this.prisma.replay.findMany({
+        where: {
+          OR: [
+            { gifUrl: null, renderJob: null },
+            // A non-null pointer with a missing local file is a lost artifact.
+            { gifUrl: { startsWith: REPLAY_FILE_PREFIX } },
+          ],
+        },
+        select: { id: true, gifUrl: true },
+        orderBy: { id: 'asc' },
         take: RECONCILE_BATCH_SIZE,
+        ...(this.reconcileCursor ? { cursor: { id: this.reconcileCursor }, skip: 1 } : {}),
       });
+      this.reconcileCursor = rows.at(-1)?.id ?? null;
     } catch (err) {
       this.logger.error(
         'Could not reconcile missing render jobs',
@@ -91,19 +133,30 @@ export class ReplayWorker implements OnModuleDestroy {
       return 0;
     }
 
-    for (const replay of pending) {
+    let reconciled = 0;
+    for (const replay of rows) {
       try {
-        await this.jobs.queueReplay(replay.id);
+        if (replay.gifUrl === null) {
+          const queued = await this.jobs.queueReplay(replay.id);
+          if (queued.status === 'queued') reconciled++;
+          continue;
+        }
+        // Only guarded pointers whose file is actually missing are rebuilt.
+        // retryMissingArtifact consumes one attempt from the ORIGINAL budget;
+        // exhausted or non-completed jobs are ignored, so no retry loop forms.
+        const filename = replayFilenameFromPointer(replay.gifUrl, replay.id);
+        if (!filename || existsSync(join(this.renderDir, filename))) continue;
+        if (await this.jobs.retryMissingArtifact(replay.id, replay.gifUrl)) reconciled++;
       } catch (err) {
         // A concurrent worker may have created/claimed the job between the
         // query and this call; that is not a reconciliation failure.
         this.logger.warn(
-          `Could not queue missing render job for replay ${replay.id}`,
+          `Could not reconcile render job for replay ${replay.id}`,
           err instanceof Error ? err.message : String(err),
         );
       }
     }
-    return pending.length;
+    return reconciled;
   }
 
   /**
@@ -133,6 +186,28 @@ export class ReplayWorker implements OnModuleDestroy {
     let migrated = 0;
     let cleared = 0;
     let removed = 0;
+    let legacyRows: { id: string; gifUrl: string | null }[] = [];
+    try {
+      // Filter the legacy prefix explicitly and page by primary-key cursor.
+      // New-style pointers can never starve an old row, and each pass stays
+      // bounded to one batch. The cursor advances even for rows we skip.
+      legacyRows = await this.prisma.replay.findMany({
+        where: { gifUrl: { startsWith: REPLAY_STATIC_PREFIX } },
+        select: { id: true, gifUrl: true },
+        orderBy: { id: 'asc' },
+        take: RECONCILE_BATCH_SIZE,
+        ...(this.legacyCursor ? { cursor: { id: this.legacyCursor }, skip: 1 } : {}),
+      });
+      this.legacyCursor = legacyRows.at(-1)?.id ?? null;
+    } catch (err) {
+      this.logger.error(
+        'Could not query legacy replay GIF pointers',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    if (legacyFiles.length === 0 && legacyRows.length === 0) {
+      return { migrated, cleared, removed };
+    }
     await mkdir(this.renderDir, { recursive: true });
 
     for (const filename of legacyFiles) {
@@ -154,16 +229,12 @@ export class ReplayWorker implements OnModuleDestroy {
       }
     }
 
-    try {
-      const legacyRows = await this.prisma.replay.findMany({
-        where: { gifUrl: { not: null } },
-        select: { id: true, gifUrl: true },
-        take: RECONCILE_BATCH_SIZE,
-      });
-      for (const replay of legacyRows) {
-        if (replayFilenameFromPointer(replay.gifUrl, replay.id) === null) continue;
-        if (!replay.gifUrl!.startsWith(REPLAY_STATIC_PREFIX)) continue;
-        const filePath = join(this.renderDir, replayGifFilename(replay.id));
+    for (const replay of legacyRows) {
+      // Fail closed: a pointer that does not match this replay's id is never a
+      // reason to move or rewrite a file for another replay.
+      if (replayFilenameFromPointer(replay.gifUrl, replay.id) === null) continue;
+      const filePath = join(this.renderDir, replayGifFilename(replay.id));
+      try {
         if (!existsSync(filePath)) {
           await this.prisma.replay.update({
             where: { id: replay.id },
@@ -177,12 +248,12 @@ export class ReplayWorker implements OnModuleDestroy {
           data: { gifUrl: replayFileUrl(replay.id) },
         });
         migrated++;
+      } catch (err) {
+        this.logger.warn(
+          `Could not reconcile legacy replay GIF pointer for ${replay.id}`,
+          err instanceof Error ? err.message : String(err),
+        );
       }
-    } catch (err) {
-      this.logger.error(
-        'Could not reconcile legacy replay GIF pointers',
-        err instanceof Error ? err.message : String(err),
-      );
     }
 
     return { migrated, cleared, removed };
@@ -253,24 +324,45 @@ export class ReplayWorker implements OnModuleDestroy {
       })
       .finally(() => {
         this.activeJobs.delete(job.id);
+        this.settledJobs.delete(job.id);
       });
     this.activeJobs.set(job.id, task);
+  }
+
+  /** Mark a job settled so a late worker message cannot write its gifUrl. */
+  private settleJob(jobId: string) {
+    this.settledJobs.add(jobId);
+    this.activeWorkers.get(jobId)?.terminate().catch(() => undefined);
   }
 
   private async executeJob(job: RenderJobRecord) {
     const replay = await this.prisma.replay.findUnique({ where: { id: job.replayId } });
     if (!replay) {
+      this.settleJob(job.id);
       await this.jobs.fail(job.id, 'Replay no longer exists');
       return;
     }
     if (this.shuttingDown) {
+      this.settleJob(job.id);
       await this.jobs.fail(job.id, SHUTDOWN_ERROR);
       return;
     }
     try {
       await this.renderInWorker(job.id, job.replayId, replay.strokes as any[], replay.durationMs);
-      await this.jobs.succeed(job.id);
+      // Fencing: the timeout/shutdown path may have settled this job already.
+      if (this.settledJobs.has(job.id)) return;
+      this.settleJob(job.id);
+      const succeeded = await this.jobs.succeed(job.id);
+      if (!succeeded) {
+        // Another worker took the lease: the file we wrote belongs to a stale
+        // lease, so clear the pointer and let the current owner render it.
+        await this.prisma.replay.update({
+          where: { id: job.replayId },
+          data: { gifUrl: null },
+        });
+      }
     } catch (err) {
+      this.settleJob(job.id);
       const message = err instanceof Error ? err.message : String(err);
       await this.jobs.fail(job.id, message);
     }
@@ -306,6 +398,9 @@ export class ReplayWorker implements OnModuleDestroy {
       };
 
       const timeout = setTimeout(() => {
+        // Settle before rejecting: a late message from this worker must never
+        // set gifUrl after the timeout has invalidated the job.
+        this.settleJob(jobId);
         releaseWorker();
         void worker.terminate();
         reject(new Error(this.shuttingDown ? SHUTDOWN_ERROR : `Worker timeout for ${jobId}`));
@@ -313,7 +408,7 @@ export class ReplayWorker implements OnModuleDestroy {
 
       worker.on('message', async (result: Buffer | { error: string }) => {
         clearTimeout(timeout);
-        if (this.shuttingDown) {
+        if (this.shuttingDown || this.settledJobs.has(jobId)) {
           releaseWorker();
           reject(new Error(SHUTDOWN_ERROR));
           return;
@@ -332,6 +427,12 @@ export class ReplayWorker implements OnModuleDestroy {
           const filepath = join(this.renderDir, filename);
           await writeFile(filepath, gifBuffer);
 
+          // Re-check the fence after the async file write: fail/requeue or
+          // shutdown may have settled the job while we were writing.
+          if (this.shuttingDown || this.settledJobs.has(jobId)) {
+            reject(new Error(SHUTDOWN_ERROR));
+            return;
+          }
           const gifUrl = replayFileUrl(replayId);
           await this.prisma.replay.update({
             where: { id: replayId },

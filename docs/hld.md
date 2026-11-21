@@ -11,9 +11,9 @@ flowchart LR
   Web[Next.js web app<br/>apps/web] -->|server-side fetch INTERNAL_API_URL| API
   API[NestJS API<br/>apps/api] -->|Prisma / TCP| PG[(PostgreSQL 16)]
   API -->|pub/sub + leases| Redis[(Redis 7)]
-  API -->|local files public/replays| Media[(API container filesystem)]
+  API -->|private volume /app/apps/api/private-replays| Media[(API container filesystem)]
   Admin[Admin browser] -->|/api/moderation, /api/flags| API
-  Web -->|static avatar/replay URLs| Media
+  Web -->|static avatar URLs only| Media
 ```
 
 Actors and entry points:
@@ -88,7 +88,7 @@ Room passwords are stored as unsalted `sha256("room-pwd:" + password)` in the ro
 
 ### Local filesystem — replay GIFs
 
-`replay.worker.ts` renders GIFs in a `worker_threads` worker into `public/replays/<replayId>.gif` and records `/replays/<id>.gif` in the DB. `docker-compose.yml` mounts `media_data` at `/app/apps/api/public`, so the files survive container recreation on a single host but are not shared across hosts. Render jobs are persisted in PostgreSQL `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`) with attempt counters, leases and stale-job recovery, so a restart does not lose the queue; a process-local store remains only as a fallback when the table is absent. Rendering is capped at 3 concurrent jobs per process plus a 5-minute cron sweeper; render timeout is 60 s. Product funnel events are persisted in `funnel_events` by the same migration.
+`replay.worker.ts` renders GIFs in a `worker_threads` worker into `/app/apps/api/private-replays/<replayId>.gif` (a persistent Docker volume, `replay_data`) and records the guarded pointer `/api/replays/file/<id>.gif` in the DB. The private directory is deliberately outside `public`, and `main.ts` serves only `public/avatars` statically, so GIFs can only be streamed after `ReplayService.assertReplayAccess` succeeds on `GET /api/replays/file/:id.gif` or `GET /api/replays/:id/gif` (both stream in-context; neither redirects, because a redirect would drop `Authorization` and `?share`). Legacy `/replays/*.gif` files are migrated once at startup and reconciled by a cursor-bounded minute cron; legacy pointers are rewritten or cleared, and stale files under `public/replays` are removed. `media_data` remains mounted at `/app/apps/api/public` only for avatars. Files survive container recreation on a single host but are not shared across hosts; reconciliation detects a non-null pointer with a missing file and rebuilds it within the job's remaining attempt budget. Render jobs are persisted in PostgreSQL `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`) with attempt counters, leases and stale-job recovery, so a restart does not lose the queue; a process-local store remains only as a fallback when the table is absent. Lease recovery and artifact rebuilds consume the original attempt budget (no infinite retry). Rendering is capped at 3 concurrent jobs per process plus a 1-minute cron sweeper; render timeout is 60 s. Product funnel events are persisted in `funnel_events` by the same migration.
 
 ## 5. Trust boundaries and authorization
 

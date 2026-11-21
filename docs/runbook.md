@@ -86,10 +86,10 @@ Symptoms: `GET /api/replays/stats` shows many pending GIFs; `gifUrl` stays null.
 
 1. Check API logs for "Queued render", "Max concurrent renders", "Worker timeout", "Failed to render".
 2. Confirm `gif-worker.js` exists in the built output (log says "gif-worker.js not found at ..." otherwise → rebuild API image).
-3. Render jobs are durable in `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`); a restart requeues stale leases. Rendering is capped at 3 concurrent jobs with a 60 s timeout and a 5-minute cron sweep; wait one sweep before escalating.
+3. Render jobs are durable in `render_jobs` (migration `20261123_durable_render_jobs_funnel_events`); a restart requeues stale leases and consumes one attempt from the original budget per recovery. Rendering is capped at 3 concurrent jobs with a 60 s timeout and a 1-minute cron sweep; wait one sweep before escalating.
 4. Inspect queue state: `SELECT state, count(*) FROM render_jobs GROUP BY state;`. A fallback in-memory store is used only if the table is missing (check the startup warning).
-5. Check filesystem of the API container: `docker compose exec api ls -la /app/apps/api/public/replays`.
-6. A deterministically failing job ends in `failed` after its retry budget is exhausted — there is no dead-letter queue or alert. Read `error` from `render_jobs`; a public retry resets the budget. Do not delete rows unless the replay is known bad.
+5. Check the persistent private GIF volume: `docker compose exec api ls -la /app/apps/api/private-replays`. Legacy `public/replays` files are migration-only and removed at startup.
+6. A pointer with no file is rebuilt by reconciliation only while the job's original attempt budget remains; exhausted jobs stay terminal. A deterministically failing job ends in `failed` after its budget is exhausted — there is no dead-letter queue or alert. Read `error` from `render_jobs`; do not delete rows unless the replay is known bad.
 
 ## 7. Rate-limit complaints
 
@@ -103,7 +103,7 @@ Symptoms: `GET /api/replays/stats` shows many pending GIFs; `gifUrl` stays null.
 `CleanupService` runs every 5 minutes: deletes rooms past `expiresAt` with no matches, expires challenges, deletes eligible guest sessions. It never deletes rooms with matches. Replay GIFs are only removed by `ReplayWorker.cleanupOldReplays(30)` — check whether that method is called anywhere before assuming automatic GIF cleanup.
 
 ```bash
-docker compose exec api du -sh /app/apps/api/public/replays
+docker compose exec api du -sh /app/apps/api/private-replays
 ```
 
 ## 9. Useful SQL

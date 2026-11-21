@@ -11,7 +11,6 @@ import { basename, join } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ReplayJobService } from './replay-jobs';
 import {
-  replayFileUrl,
   replayGifFilename,
   replayRenderDir,
 } from './replay-paths';
@@ -240,12 +239,15 @@ export class ReplayService {
   }
 
   async getJobStatus(jobId: string, context?: ReplayReadContext) {
-    const status = await this.jobs.getStatus(jobId);
-    // A job snapshot exposes gifUrl and replayId, so it needs the same check.
-    if (status?.replayId) {
-      await this.assertAccessByReplayId(status.replayId, context);
-    }
-    return status;
+    // Authorize before reading the job: a job snapshot exposes replayId/gifUrl,
+    // and an unknown id must not leak whether a job exists. A thrown
+    // "job not found" is only reachable after access is established.
+    const replay = await this.prisma.replay.findFirst({
+      where: { renderJob: { id: jobId } },
+      select: { id: true, ...VISIBILITY_RELATIONS },
+    });
+    await this.assertReplayAccess(replay, context);
+    return this.jobs.getStatus(jobId);
   }
 
   async getRenderStatus(replayId: string, context?: ReplayReadContext) {
@@ -264,11 +266,16 @@ export class ReplayService {
     await this.assertReplayAccess(replay, context);
   }
 
-  async getGif(replayId: string, context?: ReplayReadContext) {
-    const replay = await this.getReplay(replayId, context);
-    const job = await this.jobs.getJobByReplay(replayId);
-    this.jobs.assertRendered(replay, job);
-    return replayFileUrl(replayId);
+  /**
+   * Streams from the same guarded route for both /file/:id.gif and /:id/gif.
+   * A 302 redirect would drop Authorization and ?share, turning an authorized
+   * UNLISTED/PRIVATE read into an unauthenticated request that fails closed.
+   */
+  async getGif(
+    replayId: string,
+    context?: ReplayReadContext,
+  ): Promise<StreamableFile> {
+    return this.streamGif(replayId, context);
   }
 
   /**

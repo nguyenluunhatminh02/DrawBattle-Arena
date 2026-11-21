@@ -61,6 +61,7 @@ function makeWorker(replayRows: unknown[] = []) {
     fail: jest.fn().mockResolvedValue(null),
     succeed: jest.fn().mockResolvedValue(null),
     recoverStale: jest.fn().mockResolvedValue(undefined),
+    retryMissingArtifact: jest.fn().mockResolvedValue(true),
   } as any;
   return { worker: new ReplayWorker(prisma, jobs), prisma, jobs };
 }
@@ -69,7 +70,7 @@ describe('ReplayWorker', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('reconciles capped replays that have neither a GIF nor a job', async () => {
-    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `replay-${i}` }));
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: `replay-${i}`, gifUrl: null }));
     const { worker, prisma, jobs } = makeWorker(rows);
 
     const reconciled = await worker.reconcileMissingRenderJobs();
@@ -77,12 +78,64 @@ describe('ReplayWorker', () => {
     expect(reconciled).toBe(100);
     expect(prisma.replay.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { gifUrl: null, renderJob: null },
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            { gifUrl: null, renderJob: null },
+            { gifUrl: { startsWith: '/api/replays/file/' } },
+          ]),
+        }),
         take: 100,
+        orderBy: { id: 'asc' },
       }),
     );
     expect(jobs.queueReplay).toHaveBeenCalledTimes(100);
     expect(jobs.queueReplay).toHaveBeenCalledWith('replay-0');
+  });
+
+  it('requeues completed jobs whose GIF artifact is missing, with a bounded budget', async () => {
+    const { mkdtemp, mkdir, rm } = jest.requireActual('fs/promises');
+    const os = jest.requireActual('os');
+    const path = jest.requireActual('path');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'replay-reconcile-'));
+    const cwd = jest.spyOn(process, 'cwd').mockReturnValue(dir);
+    try {
+      const { worker, jobs } = makeWorker([
+        { id: 'replay-missing', gifUrl: '/api/replays/file/replay-missing.gif' },
+      ]);
+      await mkdir(path.join(dir, 'private-replays'), { recursive: true });
+
+      expect(await worker.reconcileMissingRenderJobs()).toBe(1);
+      expect(jobs.retryMissingArtifact).toHaveBeenCalledWith(
+        'replay-missing',
+        '/api/replays/file/replay-missing.gif',
+      );
+      expect(jobs.queueReplay).not.toHaveBeenCalled();
+    } finally {
+      cwd.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not requeue a pointer whose artifact exists', async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = jest.requireActual('fs/promises');
+    const os = jest.requireActual('os');
+    const path = jest.requireActual('path');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'replay-present-'));
+    const cwd = jest.spyOn(process, 'cwd').mockReturnValue(dir);
+    try {
+      await mkdir(path.join(dir, 'private-replays'), { recursive: true });
+      await writeFile(path.join(dir, 'private-replays', 'replay-1.gif'), 'gif');
+      const { worker, jobs } = makeWorker([
+        { id: 'replay-1', gifUrl: '/api/replays/file/replay-1.gif' },
+      ]);
+
+      expect(await worker.reconcileMissingRenderJobs()).toBe(0);
+      expect(jobs.retryMissingArtifact).not.toHaveBeenCalled();
+      expect(jobs.queueReplay).not.toHaveBeenCalled();
+    } finally {
+      cwd.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('skips reconciliation when the job table is unavailable', async () => {
@@ -140,7 +193,7 @@ describe('ReplayWorker', () => {
 
       expect(result).toEqual({ migrated: 2, cleared: 1, removed: 1 });
       await expect(
-        readFile(path.join(dir, 'private', 'replays', 'replay-1.gif'), 'utf8'),
+        readFile(path.join(dir, 'private-replays', 'replay-1.gif'), 'utf8'),
       ).resolves.toBe('gif');
       expect(prisma.replay.update).toHaveBeenCalledWith({
         where: { id: 'replay-1' },
@@ -191,8 +244,8 @@ describe('ReplayWorker', () => {
     const os = jest.requireActual('os');
     const path = jest.requireActual('path');
     const dir = await mkdtemp(path.join(os.tmpdir(), 'replay-cleanup-'));
-    await mkdir(path.join(dir, 'private', 'replays'), { recursive: true });
-    await writeFile(path.join(dir, 'private', 'replays', 'replay-1.gif'), 'gif');
+    await mkdir(path.join(dir, 'private-replays'), { recursive: true });
+    await writeFile(path.join(dir, 'private-replays', 'replay-1.gif'), 'gif');
     const cwd = jest.spyOn(process, 'cwd').mockReturnValue(dir);
 
     try {

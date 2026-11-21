@@ -64,7 +64,11 @@ services:
     ports:
       - '3001:3001'
     volumes:
+      # Public assets (avatars) stay on this volume. Replay GIFs are private and
+      # use a separate persistent volume outside the statically served tree so
+      # they survive container recreation without becoming web-accessible.
       - media_data:/app/apps/api/public
+      - replay_data:/app/apps/api/private-replays
     healthcheck:
       # /api/flags is an unauthenticated GET; it confirms the HTTP process
       # answers, not that Prisma/Redis are healthy. Node 20 has global fetch;
@@ -114,3 +118,6 @@ volumes:
   pgdata:
   redisdata:
   media_data:
+  # Private, persistent replay GIF storage. Not mounted under `public` and not
+  # exposed by any web rewrite: only /api/replays/file/:id.gif can stream it.
+  replay_data:

@@ -3,7 +3,6 @@ import {
   Get,
   Post,
   Param,
-  Res,
   HttpCode,
   HttpStatus,
   Headers,
@@ -12,7 +11,6 @@ import {
 } from '@nestjs/common';
 import { ReplayService, type ReplayReadContext } from './replay.service';
 import { Throttle } from '../../common/throttle.guard';
-import type { Response } from 'express';
 
 @Controller('replays')
 export class ReplayController {
@@ -111,20 +109,22 @@ export class ReplayController {
     );
   }
 
+  /**
+   * Legacy /:id/gif alias streams directly: a redirect would drop the caller's
+   * Authorization header and ?share token, breaking authorized private reads.
+   */
   @Get(':id/gif')
   @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-read' })
   async getGif(
     @Param('id') id: string,
-    @Res() res: Response,
     @Headers('authorization') authorization?: string,
     @Query('share') share?: string,
     @Headers('x-share-token') shareHeader?: string,
-  ) {
-    const gifUrl = await this.replayService.getGif(
+  ): Promise<StreamableFile> {
+    return this.replayService.getGif(
       id,
       this.readContext(authorization, share, shareHeader),
     );
-    return res.redirect(gifUrl);
   }
 
   @Get(':id')

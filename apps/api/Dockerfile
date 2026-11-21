@@ -37,6 +37,12 @@ COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /app/apps/api/prisma ./apps/api/prisma
 COPY --from=build /app/apps/api/package.json ./apps/api/package.json
+# Persistent private replay storage. This directory is a Docker volume mount at
+# runtime (replay_data -> /app/apps/api/private-replays) and is intentionally
+# outside the statically served public tree. The empty dir is baked in so local
+# `docker run` without the volume still has a safe, writable location.
+RUN mkdir -p /app/apps/api/private-replays
+VOLUME /app/apps/api/private-replays
 # Seed only when the word catalogue is empty. The seed script uses upserts, so
 # re-running it against a populated database cannot duplicate words.
 EXPOSE 3001
