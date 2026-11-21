@@ -79,17 +79,76 @@ record() {
   esac
 }
 
+# Record presence only; never expand a sensitive variable into the evidence file.
+mask() {
+  if [[ -n "${!1:-}" ]]; then
+    printf 'set'
+  else
+    printf 'unset'
+  fi
+}
+
+is_sensitive_env_name() {
+  case "$1" in
+    JWT_SECRET|DATABASE_URL|REDIS_URL|*TOKEN*|*PASSWORD*|*SECRET*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Redact userinfo (user:password@) from URLs anywhere in command output before
+# it is written to the evidence file.
+redact_output_line() {
+  sed -E 's#([[:alpha:]][[:alnum:]+.-]*://)[^/@[:space:]]+@#\1<redacted>@#g' <<<"$1"
+}
+
+# Display-only copy of a command. Inline KEY=value arguments for sensitive keys
+# are replaced with KEY=<redacted>; the real "$@" is still executed unchanged.
+redact_command_display() {
+  local arg name value
+  local -a parts=()
+  for arg in "$@"; do
+    if [[ "$arg" == *=* ]]; then
+      name="${arg%%=*}"
+      value="${arg#*=}"
+      if is_sensitive_env_name "$name"; then
+        parts+=("$name=<redacted>")
+      else
+        # Also scrub userinfo from URL-valued arguments such as SMOKE_API_URL.
+        if [[ "$value" == *://*@* ]]; then
+          value="$(redact_output_line "$value")"
+        fi
+        parts+=("$name=$value")
+      fi
+      continue
+    fi
+    parts+=("$arg")
+  done
+  printf '%s' "${parts[*]}"
+}
+
 run_step() {
+  local filter_output=0
+  if [[ "${1:-}" == "-filter" ]]; then
+    filter_output=1
+    shift
+  fi
   local name="$1"
   shift
   log ""
   log "=== $name ==="
-  log "+ $*"
-  if "$@" 2>&1 | tee -a "$EVIDENCE_FILE"; then
+  log "+ $(redact_command_display "$@")"
+  if (( filter_output )); then
+    "$@" 2>&1 | {
+      while IFS= read -r line || [[ -n "$line" ]]; do redact_output_line "$line"; done
+    } | tee -a "$EVIDENCE_FILE"
+  else
+    "$@" 2>&1 | tee -a "$EVIDENCE_FILE"
+  fi
+  local status="${PIPESTATUS[0]}"
+  if (( status == 0 )); then
     record PASS "$name" "exit=0"
     return 0
   fi
-  local status="${PIPESTATUS[0]}"
   record FAIL "$name" "exit=$status"
   return 1
 }
@@ -128,13 +187,13 @@ log "CI run #51 (f67719e): $CI_URL/runs/44870295188"
 log "Evidence file: $EVIDENCE_FILE"
 log ""
 log "Environment:"
-log "  DATABASE_URL=${DATABASE_URL:+set}${DATABASE_URL:-unset}"
-log "  REDIS_URL=${REDIS_URL:+set}${REDIS_URL:-unset}"
-log "  JWT_SECRET=${JWT_SECRET:+set}${JWT_SECRET:-unset}"
-log "  E2E_API_URL=${E2E_API_URL:-unset}"
-log "  E2E_WEB_URL=${E2E_WEB_URL:-unset}"
+log "  DATABASE_URL=$(mask DATABASE_URL)"
+log "  REDIS_URL=$(mask REDIS_URL)"
+log "  JWT_SECRET=$(mask JWT_SECRET)"
+log "  E2E_API_URL=$(mask E2E_API_URL)"
+log "  E2E_WEB_URL=$(mask E2E_WEB_URL)"
 log "  VERIFY_PNPM=$PNPM"
-log "Note: secret values are intentionally not printed."
+log "Note: only presence is recorded for DATABASE_URL, REDIS_URL and JWT_SECRET; their values are never printed."
 
 # 1. Install dependencies (CI: pnpm install --frozen-lockfile).
 if ! run_step "install" env CI=true "$PNPM" install --frozen-lockfile; then
@@ -261,7 +320,9 @@ if is_set E2E_API_URL && is_set E2E_WEB_URL; then
   fi
 
   run_step "playwright-e2e" env CI=true "$PNPM" --filter @drawbattle/web test:e2e || true
-  run_step "post-deploy-smoke" env CI=true \
+  # The smoke script echoes its URLs; filter its output so credentials embedded
+  # in URL userinfo cannot leak into the shareable evidence file.
+  run_step -filter "post-deploy-smoke" env CI=true \
     SMOKE_API_URL="$E2E_API_URL" \
     SMOKE_WEB_URL="$E2E_WEB_URL" \
     bash "$REPO_ROOT/scripts/smoke-test.sh" || true
