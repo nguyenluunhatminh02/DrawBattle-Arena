@@ -152,7 +152,7 @@ packages/
 | `pnpm dev` | run API + Web in parallel (watch mode) |
 | `pnpm build` | build shared + api + web |
 | `pnpm typecheck` | tsc --noEmit across all workspaces |
-| `pnpm test` | jest (28 unit tests) |
+| `pnpm test` | full API Jest suite (see CI for the current count) |
 | `pnpm docker:up` | start all services via Compose |
 
 ## Testing

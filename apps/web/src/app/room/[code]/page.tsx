@@ -12,7 +12,7 @@ import { api } from '@/lib/api';
 import { DrawingCanvas } from '@/components/canvas/DrawingCanvas';
 import { QRCodeDisplay } from '@/components/ui/qr-code';
 import { getModeConfig } from '@drawbattle/shared';
-import type { RoomSnapshot, PlayerInfo, StrokeChunk, ChatMessage, ScoreUpdate, MatchResult, TurnSnapshot, PhaseData, GamePhase, WordOption, TeamsPayload } from '@drawbattle/shared';
+import type { RoomSnapshot, PlayerInfo, StrokeChunk, ChatMessage, ScoreUpdate, MatchResult, TurnSnapshot, PhaseData, GamePhase, WordOption, TeamsPayload, ServerToClientEvents } from '@drawbattle/shared';
 import { AppShell } from '@/components/layout';
 
 export default function RoomPage() {
@@ -55,6 +55,11 @@ export default function RoomPage() {
   const [roomUnavailable, setRoomUnavailable] = useState<string | null>(null);
   const [joinVersion, setJoinVersion] = useState(0);
   const autoJoinRef = useRef(false);
+
+  // Only the current effect invocation may drive the shared socket. A page
+  // replaced by a newer session (or unmounted) must never emit actions or
+  // disconnect the live replacement socket.
+  const activeSocketRef = useRef<ReturnType<typeof getSocket> | null>(null);
 
   const [hydrated, setHydrated] = useState(false);
   useEffect(() => setHydrated(true), []);
@@ -135,29 +140,70 @@ export default function RoomPage() {
     const socket = connectSocket(socketToken);
     const store = useGameStore.getState;
 
+    // Track every handler registered by this effect so cleanup and session
+    // replacement only touch our own listeners, never other consumers'.
+    type SocketEvent = keyof ServerToClientEvents | 'connect' | 'disconnect';
+    const listeners: Array<{ event: SocketEvent; handler: (...args: any[]) => void }> = [];
+    const on = <E extends SocketEvent>(event: E, handler: (...args: any[]) => void) => {
+      listeners.push({ event, handler });
+      socket.on(event as any, handler);
+    };
+
+    activeSocketRef.current = socket;
+    let active = true;
     let joined = false;
+    // E2E observation hook: only installed when explicitly requested by a
+    // query parameter, so production behavior is unchanged.
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('socketProbe')) {
+      (window as any).__drawbattleSocketProbe = {
+        getSocket: () => getSocket(),
+        isActive: () => activeSocketRef.current === socket && active,
+        listenerCount: (event: string) => socket.listeners(event as any).length,
+        registerObserver: (event: string, handler: (...args: any[]) => void) => {
+          socket.on(event as any, handler);
+          return () => socket.off(event as any, handler);
+        },
+        emit: (event: any, payload?: any) => {
+          const current = activeSocketRef.current;
+          return current === getSocket() ? current?.emit(event, payload) : undefined;
+        },
+      };
+    }
     const join = () => {
-      if (joined) return;
+      if (!active || activeSocketRef.current !== socket || joined) return;
       joined = true;
       socket.emit('room:join', { roomCode: code, token: socketToken, password: passwordRef.current || undefined });
       setTimeout(() => {
-        if (!useGameStore.getState().room) socket.emit('state:resync');
+        if (active && activeSocketRef.current === socket && !useGameStore.getState().room) {
+          socket.emit('state:resync');
+        }
       }, 1500);
     };
-    socket.on('disconnect', () => {
+    on('disconnect', () => {
       setConnected(false);
       // A network reconnect reuses this socket object. Re-emitting the join is
       // safe: the gateway revokes the old socket for the same player slot.
       joined = false;
     });
-    socket.on('session:replaced', () => {
-      // A newer socket (for example after a page reload) took over this
-      // identity. Stop driving the shared socket instance so an unmount or
-      // reconnect from this page cannot revoke the live socket's membership.
+    const releaseSocket = () => {
+      // Stop driving the shared socket instance so an unmount or reconnect
+      // from this page cannot revoke the live replacement's membership.
+      active = false;
       joined = true;
-      socket.removeAllListeners();
+      if (activeSocketRef.current === socket) activeSocketRef.current = null;
+      for (const { event, handler } of listeners) {
+        socket.off(event as any, handler);
+      }
+      listeners.length = 0;
+      setConnected(false);
+    };
+    on('session:replaced', () => {
+      // A newer socket (for example after a page reload) took over this
+      // identity. Remove only this effect's handlers; other consumers of the
+      // shared socket keep their listeners and the live connection.
+      releaseSocket();
     });
-    socket.on('connect', () => {
+    on('connect', () => {
       setConnected(true);
       join();
     });
@@ -166,7 +212,7 @@ export default function RoomPage() {
       setTimeout(join, 0);
     }
 
-    socket.on('room:snapshot', (snapshot: RoomSnapshot) => {
+    on('room:snapshot', (snapshot: RoomSnapshot) => {
       const s = store();
       s.setRoom({
         code: snapshot.code || code,
@@ -182,7 +228,7 @@ export default function RoomPage() {
       s.setScores(snapshot.players.map(p => ({ playerId: p.id, points: p.score, delta: 0 })));
     });
 
-    socket.on('room:playerJoined', (p: PlayerInfo) => {
+    on('room:playerJoined', (p: PlayerInfo) => {
       store().setRoom(r => {
         if (!r) return r;
         if (r.players.some(x => x.id === p.id)) return r;
@@ -190,7 +236,7 @@ export default function RoomPage() {
       });
     });
 
-    socket.on('room:playerLeft', (playerId: string) => {
+    on('room:playerLeft', (playerId: string) => {
       const s = store();
       s.setRoom(r => {
         if (!r) return r;
@@ -199,11 +245,11 @@ export default function RoomPage() {
       s.setScores(s.scores.filter(x => x.playerId !== playerId));
     });
 
-    socket.on('room:hostChanged', (newHostId: string) => {
+    on('room:hostChanged', (newHostId: string) => {
       store().setRoom(r => (r ? { ...r, hostId: newHostId } : r));
     });
 
-    socket.on('match:started', (data) => {
+    on('match:started', (data) => {
       const s = store();
       s.setPhase('WORD_PICK');
       s.clearStrokes();
@@ -218,11 +264,11 @@ export default function RoomPage() {
       s.setScores((s.room?.players ?? []).map(p => ({ playerId: p.id, points: 0, delta: 0 })));
     });
 
-    socket.on('match:teams', (data: TeamsPayload) => {
+    on('match:teams', (data: TeamsPayload) => {
       setTeams(data);
     });
 
-    socket.on('turn:youAreDrawer', (data: { turnId: string; words: WordOption[]; timeLimit: number }) => {
+    on('turn:youAreDrawer', (data: { turnId: string; words: WordOption[]; timeLimit: number }) => {
       const s = store();
       s.setDrawerId(s.myPlayerId);
       s.setCurrentTurnId(data.turnId);
@@ -235,7 +281,7 @@ export default function RoomPage() {
       setShowWordPicker(true);
     });
 
-    socket.on('turn:publicState', (data: { turnId: string; drawerId: string; timeLimit: number }) => {
+    on('turn:publicState', (data: { turnId: string; drawerId: string; timeLimit: number }) => {
       const s = store();
       s.setDrawerId(data.drawerId);
       s.setCurrentTurnId(data.turnId);
@@ -244,11 +290,11 @@ export default function RoomPage() {
       if (data.drawerId !== s.myPlayerId) setShowWordPicker(false);
     });
 
-    socket.on('turn:yourWord', (data: { word: string }) => {
+    on('turn:yourWord', (data: { word: string }) => {
       store().setCurrentWord(data.word);
     });
 
-    socket.on('match:phaseChanged', (data: PhaseData & { phase: GamePhase }) => {
+    on('match:phaseChanged', (data: PhaseData & { phase: GamePhase }) => {
       const s = store();
       s.setPhase(data.phase);
       if (data.endsAt) s.setTurnEndsAt(data.endsAt);
@@ -262,37 +308,37 @@ export default function RoomPage() {
       }
     });
 
-    socket.on('turn:hint', (data: { hint: string }) => {
+    on('turn:hint', (data: { hint: string }) => {
       store().setHint(data.hint);
     });
 
-    socket.on('draw:chunk', (chunk: StrokeChunk) => {
+    on('draw:chunk', (chunk: StrokeChunk) => {
       store().addStroke(chunk);
     });
 
-    socket.on('draw:reset', () => {
+    on('draw:reset', () => {
       store().clearStrokes();
     });
 
-    socket.on('draw:undo', (strokeId: string) => {
+    on('draw:undo', (strokeId: string) => {
       const s = store();
       s.setStrokes(s.strokes.filter(x => x.strokeId !== strokeId));
     });
 
-    socket.on('room:playerKicked', (data: { playerId: string }) => {
+    on('room:playerKicked', (data: { playerId: string }) => {
       if (data.playerId === useGameStore.getState().myPlayerId) {
         alert('Bạn đã bị host kick khỏi phòng');
         router.push('/');
       }
     });
 
-    socket.on('room:playerMuted', (data: { playerId: string; muted: boolean }) => {
+    on('room:playerMuted', (data: { playerId: string; muted: boolean }) => {
       if (data.playerId === useGameStore.getState().myPlayerId && data.muted) {
         alert('Bạn đã bị mute bởi host');
       }
     });
 
-    socket.on('guess:correct', (data: { playerId: string; score: number }) => {
+    on('guess:correct', (data: { playerId: string; score: number }) => {
       const s = store();
       const p = s.room?.players.find(x => x.id === data.playerId);
       s.addChat({
@@ -306,18 +352,18 @@ export default function RoomPage() {
       });
     });
 
-    socket.on('score:updated', (s: ScoreUpdate[]) => {
+    on('score:updated', (s: ScoreUpdate[]) => {
       store().setScores(s);
     });
 
-    socket.on('turn:revealed', (data: { word: string; correctGuessers: string[]; drawerScore: number }) => {
+    on('turn:revealed', (data: { word: string; correctGuessers: string[]; drawerScore: number }) => {
       store().setPhase('REVEAL');
       setRevealWord(data.word);
       setRevealGuessers(data.correctGuessers);
       setShowWordPicker(false);
     });
 
-    socket.on('match:finished', (results: MatchResult & { persisted?: boolean }) => {
+    on('match:finished', (results: MatchResult & { persisted?: boolean }) => {
       store().setPhase('MATCH_RESULT');
       setMatchResults(results);
       if (results.persisted === false) {
@@ -325,10 +371,10 @@ export default function RoomPage() {
       }
     });
 
-    socket.on('guess:accepted', (data: { playerId: string }) => {
+    on('guess:accepted', (data: { playerId: string }) => {
     });
 
-    socket.on('turn:restore', (t: TurnSnapshot) => {
+    on('turn:restore', (t: TurnSnapshot) => {
       const s = store();
       s.setCurrentTurnId(t.id);
       s.setDrawerId(t.drawerId);
@@ -338,22 +384,22 @@ export default function RoomPage() {
       for (const c of t.strokes) s.addStroke(c);
     });
 
-    socket.on('chat:message', (msg: ChatMessage) => {
+    on('chat:message', (msg: ChatMessage) => {
       store().addChat(msg);
     });
 
-    socket.on('room:left', () => {
+    on('room:left', () => {
       router.push('/');
     });
 
-    socket.on('room:kicked', () => {
+    on('room:kicked', () => {
       alert('Bạn đã bị host kick khỏi phòng');
       useGameStore.getState().setRoom(null);
       useGameStore.getState().setMyPlayerId(null);
       router.push('/');
     });
 
-    socket.on('error', (errCode: string, message: string) => {
+    on('error', (errCode: string, message: string) => {
       if (errCode === 'INVALID_PASSWORD') {
         joined = false;
         setJoining(false);
@@ -371,7 +417,7 @@ export default function RoomPage() {
       setTimeout(() => setErrorMsg(null), 5000);
     });
 
-    socket.on('match:cancelled', () => {
+    on('match:cancelled', () => {
       const s = store();
       s.setPhase(null);
       s.clearStrokes();
@@ -386,8 +432,11 @@ export default function RoomPage() {
     });
 
     return () => {
-      socket.removeAllListeners();
-      disconnectSocket();
+      const wasActive = activeSocketRef.current === socket;
+      releaseSocket();
+      // Only the still-active owner may disconnect the shared singleton. A
+      // replaced page must leave the live socket for its replacement.
+      if (wasActive) disconnectSocket();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, identityReady, socketToken, code, joinVersion, router]);
@@ -503,6 +552,13 @@ export default function RoomPage() {
         : 'Chat...';
   const chatDisabled = (amIDrawer || teammateDrawing) && isInDrawingPhase;
 
+  // All user actions go through this guard: after session:replaced the stale
+  // page must be a no-op, even if its handlers are still mounted briefly.
+  function getActiveSocket() {
+    const socket = activeSocketRef.current;
+    return socket === getSocket() ? socket : null;
+  }
+
   async function joinWithNickname() {
     const name = joinNickname.trim();
     if (!name || joining) return;
@@ -549,21 +605,21 @@ export default function RoomPage() {
   }
 
   function handleStart() {
-    getSocket()?.emit('match:start');
+    getActiveSocket()?.emit('match:start');
   }
 
   function handleRematch() {
-    getSocket()?.emit('match:rematch');
+    getActiveSocket()?.emit('match:rematch');
   }
 
   function handleChooseWord(wordId: string) {
-    getSocket()?.emit('turn:chooseWord', wordId);
+    getActiveSocket()?.emit('turn:chooseWord', wordId);
     setShowWordPicker(false);
   }
 
   function handleSendChat() {
     if (!chatInput.trim()) return;
-    const socket = getSocket();
+    const socket = getActiveSocket();
     if (!socket) return;
     if (currentPhase === 'DRAWING' && !amIDrawer) {
       socket.emit('guess:submit', chatInput.trim());
@@ -574,25 +630,25 @@ export default function RoomPage() {
   }
 
   function handleStroke(chunk: StrokeChunk) {
-    getSocket()?.emit('draw:strokeChunk', chunk);
+    getActiveSocket()?.emit('draw:strokeChunk', chunk);
     useGameStore.getState().addStroke(chunk);
   }
 
   function handleStrokeStart(data: { turnId: string; strokeId: string }) {
-    getSocket()?.emit('draw:strokeStart', data);
+    getActiveSocket()?.emit('draw:strokeStart', data);
   }
 
   function handleStrokeEnd(data: { turnId: string; strokeId: string }) {
-    getSocket()?.emit('draw:strokeEnd', data);
+    getActiveSocket()?.emit('draw:strokeEnd', data);
   }
 
   function handleClear() {
-    getSocket()?.emit('draw:clear');
+    getActiveSocket()?.emit('draw:clear');
     useGameStore.getState().clearStrokes();
   }
 
   function handleUndo() {
-    getSocket()?.emit('draw:undo');
+    getActiveSocket()?.emit('draw:undo');
   }
 
   function copyLink() {
@@ -631,7 +687,7 @@ export default function RoomPage() {
           </Button>
           <Button size="sm" variant="ghost" className="text-danger-on-arena shrink-0 h-11 px-3" onClick={() => {
             if (confirm('Bạn có chắc muốn rời phòng?')) {
-              getSocket()?.emit('room:leave');
+              getActiveSocket()?.emit('room:leave');
             }
           }}>
             <span className="hidden md:inline">Rời phòng</span><span className="md:hidden">Thoát</span>
@@ -692,7 +748,7 @@ export default function RoomPage() {
                           {amIHost && p.id !== myPlayerId && (
                             <div className="flex gap-1">
                               <button
-                                onClick={() => getSocket()?.emit('room:hostAction', { action: 'mute', targetId: p.id })}
+                                onClick={() => getActiveSocket()?.emit('room:hostAction', { action: 'mute', targetId: p.id })}
                                 className="w-11 h-11 flex items-center justify-center text-base bg-panel rounded hover:bg-panel/70 text-on-arena"
                                 aria-label={p.isMuted ? 'Bật tiếng' : 'Tắt tiếng'}
                                 title={p.isMuted ? 'Bật tiếng' : 'Tắt tiếng'}
@@ -700,7 +756,7 @@ export default function RoomPage() {
                               <button
                                 onClick={() => {
                                   if (confirm(`Kick ${p.nickname}?`)) {
-                                    getSocket()?.emit('room:hostAction', { action: 'kick', targetId: p.id });
+                                    getActiveSocket()?.emit('room:hostAction', { action: 'kick', targetId: p.id });
                                   }
                                 }}
                                 className="w-11 h-11 flex items-center justify-center text-base bg-destructive/10 rounded hover:bg-destructive/20"
@@ -720,7 +776,7 @@ export default function RoomPage() {
                         <select
                           id="room-rounds"
                           value={room.settings.rounds}
-                          onChange={e => getSocket()?.emit('room:updateSettings', { rounds: parseInt(e.target.value) })}
+                          onChange={e => getActiveSocket()?.emit('room:updateSettings', { rounds: parseInt(e.target.value) })}
                           className="h-11 rounded-md border border-panel-border/30 bg-panel px-3 text-base text-on-arena"
                         >
                           {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
@@ -732,7 +788,7 @@ export default function RoomPage() {
                           <select
                             id="room-duration"
                             value={room.settings.turnDuration}
-                            onChange={e => getSocket()?.emit('room:updateSettings', { turnDuration: parseInt(e.target.value) })}
+                            onChange={e => getActiveSocket()?.emit('room:updateSettings', { turnDuration: parseInt(e.target.value) })}
                             className="h-11 rounded-md border border-panel-border/30 bg-panel px-3 text-base text-on-arena"
                           >
                             {[45, 60, 90].map(n => <option key={n} value={n}>{n}s</option>)}
@@ -742,7 +798,7 @@ export default function RoomPage() {
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-muted-on-arena">Gợi ý (hints)</span>
                         <button
-                          onClick={() => getSocket()?.emit('room:updateSettings', { enableHints: !room.settings.enableHints })}
+                          onClick={() => getActiveSocket()?.emit('room:updateSettings', { enableHints: !room.settings.enableHints })}
                           className={`w-12 h-11 rounded-full transition-colors relative ${room.settings.enableHints ? 'bg-primary' : 'bg-panel'}`}
                           aria-label="Bật/tắt gợi ý"
                           aria-pressed={room.settings.enableHints}
@@ -776,7 +832,7 @@ export default function RoomPage() {
                         className="w-full"
                         onClick={() => {
                           const me = room.players.find(p => p.id === myPlayerId);
-                          getSocket()?.emit('room:ready', !me?.isReady);
+                          getActiveSocket()?.emit('room:ready', !me?.isReady);
                         }}
                       >
                         {room.players.find(p => p.id === myPlayerId)?.isReady ? 'Bỏ sẵn sàng' : 'Sẵn sàng'}
