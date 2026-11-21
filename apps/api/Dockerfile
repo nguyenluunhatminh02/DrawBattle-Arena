@@ -41,4 +41,4 @@ COPY --from=build /app/apps/api/package.json ./apps/api/package.json
 # re-running it against a populated database cannot duplicate words.
 EXPOSE 3001
 WORKDIR /app/apps/api
-CMD ["sh", "-c", "set -e; pnpm exec prisma migrate deploy; WORD_COUNT=$(psql \"$DATABASE_URL\" -tAc 'SELECT count(*) FROM words'); if [ \"$WORD_COUNT\" = '0' ]; then echo 'Seeding empty word catalogue'; pnpm exec tsx prisma/seed.ts; else echo \"Word catalogue has $WORD_COUNT words; skipping seed\"; fi; exec node dist/main"]
+CMD ["sh", "-c", "set -e; pnpm exec prisma migrate deploy; PSQL_URL=$(printf '%s' \"$DATABASE_URL\" | sed 's/[?&]schema=[^&]*//'); WORD_COUNT=$(psql \"$PSQL_URL\" -tAc 'SELECT count(*) FROM words'); if [ \"$WORD_COUNT\" = '0' ]; then echo 'Seeding empty word catalogue'; pnpm exec tsx prisma/seed.ts; else echo \"Word catalogue has $WORD_COUNT words; skipping seed\"; fi; exec node dist/main"]
