@@ -141,10 +141,90 @@ export class GameSocketGateway
     return true;
   }
 
+  /**
+   * A socket is a member of at most one game room at a time. Every action
+   * handler relies on this exact socket-id match so a superseded socket can
+   * never act on behalf of the player whose identity it used to carry.
+   */
+  private isActiveMember(socket: AuthedSocket, roomId: string, playerId: string): boolean {
+    if (socket.data.roomId !== roomId || socket.data.playerId !== playerId) return false;
+    if (!socket.rooms.has(roomId)) return false;
+    return this.roomSockets.get(roomId)?.get(playerId)?.id === socket.id;
+  }
+
+  /**
+   * Revoke a superseded socket without touching game state or the DB row:
+   * the new socket takes over the same player slot. Removing the old socket
+   * from roomSockets and clearing its data makes every guarded handler reject
+   * it, and cancelling its grace timer prevents a stale disconnect from
+   * evicting the replacement.
+   */
+  private revokeReplacedSocket(oldSocket: AuthedSocket, roomId: string, playerId: string): void {
+    this.clearDisconnectTimer(roomId, playerId, oldSocket.id);
+    const roomMap = this.roomSockets.get(roomId);
+    if (roomMap?.get(playerId)?.id === oldSocket.id) {
+      roomMap.delete(playerId);
+      if (roomMap.size === 0) this.roomSockets.delete(roomId);
+    }
+    oldSocket.leave(roomId);
+    oldSocket.emit('session:replaced', { roomId });
+    oldSocket.data.roomId = undefined;
+    oldSocket.data.roomCode = undefined;
+    oldSocket.data.playerId = undefined;
+  }
+
+  /**
+   * Detach a socket from a room it is leaving for a different room. The DB
+   * row and in-memory slot are released immediately so the abandoned slot
+   * cannot keep the room full or accept a password-free rejoin.
+   */
+  private async leaveCurrentRoom(socket: AuthedSocket): Promise<void> {
+    const roomId = socket.data.roomId;
+    const playerId = socket.data.playerId;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
+
+    this.clearDisconnectTimer(roomId, playerId, socket.id);
+
+    try {
+      await this.roomService.leaveRoom(roomId, playerId);
+    } catch (err) {
+      this.logger.error(
+        'Failed to mark player left on room switch',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    this.game.removePlayer(roomId, playerId);
+    const roomMap = this.roomSockets.get(roomId);
+    roomMap?.delete(playerId);
+    if (roomMap?.size === 0) this.roomSockets.delete(roomId);
+    socket.leave(roomId);
+    this.server.to(roomId).emit('room:playerLeft', playerId);
+    this.broadcastRoomUpdate(roomId);
+    socket.emit('room:left');
+    socket.data.roomId = undefined;
+    socket.data.roomCode = undefined;
+    socket.data.playerId = undefined;
+  }
+
   handleDisconnect(socket: AuthedSocket) {
     const roomId = socket.data.roomId;
     const playerId = socket.data.playerId;
     const sessionId = socket.data.sessionId;
+
+    if (roomId && playerId) {
+      const roomMap = this.roomSockets.get(roomId);
+      const currentSocket = roomMap?.get(playerId);
+      const pendingTimer = this.disconnectTimers.get(playerId);
+      // Only the socket still registered as this player's active member may
+      // tear down membership. A replaced (or already evicted) socket must not
+      // mark the live socket offline, cancel its grace timer or delete it from
+      // roomSockets. This also gates the shared rate-limit buckets below.
+      if (!currentSocket || currentSocket.id !== socket.id) return;
+      if (pendingTimer && (pendingTimer.roomId !== roomId || pendingTimer.socketId !== socket.id)) {
+        return;
+      }
+    }
 
     for (const [key] of this.rateLimits) {
       if (key.endsWith(`:${playerId}`) || key.endsWith(`:${sessionId}`) || key.endsWith(`:${socket.id}`)) {
@@ -153,19 +233,8 @@ export class GameSocketGateway
     }
 
     if (roomId && playerId) {
-      const roomMap = this.roomSockets.get(roomId);
-      const currentSocket = roomMap?.get(playerId);
-      const pendingTimer = this.disconnectTimers.get(playerId);
-      // A stale duplicate socket must not replace or cancel the timer owned
-      // by the live socket for this player.
-      if (
-        (currentSocket && currentSocket.id !== socket.id) ||
-        (pendingTimer && pendingTimer.socketId !== socket.id)
-      ) {
-        return;
-      }
-
       this.game.setPlayerOnline(roomId, playerId, false);
+      const roomMap = this.roomSockets.get(roomId);
       if (roomMap) {
         roomMap.delete(playerId);
         if (roomMap.size === 0) {
@@ -273,6 +342,22 @@ export class GameSocketGateway
         socket.data.identityType === 'user' ? socket.data.userId! : null,
         typeof data.password === 'string' ? data.password : undefined,
       );
+
+      // A socket may belong to at most one game room. If it is switching
+      // rooms, fully release the old membership (DB row + in-memory slot)
+      // before installing the new one.
+      if (socket.data.roomId && socket.data.roomId !== joined.roomId) {
+        await this.leaveCurrentRoom(socket);
+      }
+
+      // When the same identity reconnects with a new socket, revoke the old
+      // socket rather than leaving two sockets able to act for one player.
+      // The player slot and DB row stay intact; the new socket takes over.
+      const existingSocket = this.roomSockets.get(joined.roomId)?.get(joined.playerId);
+      if (existingSocket && existingSocket.id !== socket.id) {
+        this.revokeReplacedSocket(existingSocket, joined.roomId, joined.playerId);
+      }
+
       socket.data.playerId = joined.playerId;
       socket.data.roomId = joined.roomId;
       socket.data.roomCode = roomCode;
@@ -382,34 +467,7 @@ export class GameSocketGateway
 
   @SubscribeMessage('room:leave')
   async onRoomLeave(@ConnectedSocket() socket: AuthedSocket) {
-    const roomId = socket.data.roomId;
-    const playerId = socket.data.playerId;
-    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
-
-    this.clearDisconnectTimer(roomId, playerId, socket.id);
-
-    try {
-      await this.roomService.leaveRoom(roomId, playerId);
-    } catch (err) {
-      this.logger.error('Failed to mark player left', err instanceof Error ? err.message : String(err));
-    }
-
-    this.game.removePlayer(roomId, playerId);
-
-    const roomMap = this.roomSockets.get(roomId);
-    if (roomMap) {
-      roomMap.delete(playerId);
-      if (roomMap.size === 0) {
-        this.roomSockets.delete(roomId);
-      }
-    }
-    socket.leave(roomId);
-    this.server.to(roomId).emit('room:playerLeft', playerId);
-    this.broadcastRoomUpdate(roomId);
-    socket.emit('room:left');
-    socket.data.roomId = undefined;
-    socket.data.roomCode = undefined;
-    socket.data.playerId = undefined;
+    await this.leaveCurrentRoom(socket);
   }
 
   @SubscribeMessage('room:ready')
@@ -727,11 +785,6 @@ export class GameSocketGateway
     if (word) socket.emit('turn:yourWord', { word });
   }
 
-  private isActiveMember(socket: AuthedSocket, roomId: string, playerId: string): boolean {
-    if (!socket.rooms.has(roomId)) return false;
-    const snapshot = this.game.getSnapshot(roomId);
-    return !!snapshot?.players.some(p => p.id === playerId);
-  }
 
   private dispatchRoomEvent(roomId: string, event: RoomEvent) {
     if (event.targetId) {
