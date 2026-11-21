@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { createClient, type RedisClientType } from 'redis';
+import jwt from 'jsonwebtoken';
 import { recordMetric } from './metrics-counters';
 
 export interface ThrottleConfig {
@@ -65,6 +66,52 @@ export function Throttle(config: ThrottleConfig) {
 type Bucket = { count: number; resetAt: number };
 
 /**
+ * Resolve a throttle identity directly from the bearer token. Global guards
+ * run before controller-level `OptionalAuthGuard`, so `request.user` and
+ * `request.guest` are not populated when this guard executes. Verifying the
+ * token here (with the same JWT_SECRET and algorithm as JwtService) keeps
+ * identity-based buckets working regardless of guard registration order, and
+ * a forged/invalid token still falls back to the trusted `req.ip` bucket.
+ *
+ * Only the token's signed `sub`/`type` are used, so an attacker cannot choose
+ * an arbitrary bucket key. Validity checks that need the database (deleted
+ * users, expired guest sessions) remain in the auth guards; a stale token can
+ * at worst exhaust its own identity bucket, not another caller's.
+ */
+function bearerIdentity(request: {
+  headers?: Record<string, unknown>;
+  user?: { id?: string };
+  guest?: { sessionId?: string };
+}): string | null {
+  const populated =
+    (typeof request.user?.id === 'string' && request.user.id) ||
+    (typeof request.guest?.sessionId === 'string' && request.guest.sessionId);
+  if (populated) return `identity:${populated}`;
+
+  const header = request.headers?.authorization;
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return null;
+  const token = header.slice(7);
+  if (!token) return null;
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return null;
+  try {
+    const payload = jwt.verify(token, secret, { algorithms: ['HS256'] }) as {
+      sub?: unknown;
+      type?: unknown;
+    };
+    if ((payload.type === 'user' || payload.type === 'guest') &&
+        typeof payload.sub === 'string' && payload.sub) {
+      // Namespace by type so the same UUID in a user and a guest token cannot
+      // share a bucket.
+      return `identity:${payload.type}:${payload.sub}`;
+    }
+  } catch {
+    // Invalid signature, expired or malformed token: fall back to IP.
+  }
+  return null;
+}
+
+/**
  * Global HTTP throttle. Uses a shared Redis fixed-window bucket when REDIS_URL
  * is configured and the client is connected; otherwise it falls back to the
  * original process-local buckets. After a Redis error it retries on a cooldown
@@ -93,12 +140,10 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     // Never key on a raw client-supplied header (CF-Connecting-IP /
     // X-Forwarded-For): it is spoofable unless the trusted edge overwrites it.
     // Express resolves req.ip from trusted proxy hops via `trust proxy`.
-    const identity =
-      (request.user as { id?: string } | undefined)?.id ??
-      (request.guest as { sessionId?: string } | undefined)?.sessionId;
-    const ip = identity
-      ? `identity:${identity}`
-      : request.ip ?? request.socket?.remoteAddress ?? 'unknown';
+    // The identity resolver also checks the signed bearer token because this
+    // global guard runs before route-level OptionalAuthGuard.
+    const identity = bearerIdentity(request);
+    const ip = identity ?? request.ip ?? request.socket?.remoteAddress ?? 'unknown';
     const key = `${config.keyPrefix ?? 'global'}:${ip}`;
 
     // parseInt yields NaN for malformed values; `|| 1` hides that but also

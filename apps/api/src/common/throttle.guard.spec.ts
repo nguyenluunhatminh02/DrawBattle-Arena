@@ -1,5 +1,6 @@
 import { ExecutionContext } from '@nestjs/common';
 import { createClient } from 'redis';
+import jwt from 'jsonwebtoken';
 import { ThrottleGuard } from './throttle.guard';
 
 jest.mock('redis', () => ({
@@ -17,6 +18,8 @@ describe('ThrottleGuard', () => {
   let guard: ThrottleGuard;
   const mockReflector = { get: jest.fn() } as any;
   const originalRedisUrl = process.env.REDIS_URL;
+  const originalJwtSecret = process.env.JWT_SECRET;
+  const JWT_SECRET = 'throttle-test-secret-at-least-32-characters';
 
   const makeContext = (
     ip: string,
@@ -42,6 +45,7 @@ describe('ThrottleGuard', () => {
 
   beforeEach(() => {
     delete process.env.REDIS_URL;
+    process.env.JWT_SECRET = JWT_SECRET;
     guard = new ThrottleGuard(mockReflector);
     jest.clearAllMocks();
   });
@@ -49,6 +53,8 @@ describe('ThrottleGuard', () => {
   afterAll(() => {
     if (originalRedisUrl === undefined) delete process.env.REDIS_URL;
     else process.env.REDIS_URL = originalRedisUrl;
+    if (originalJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
   });
 
   it('allows requests under limit', async () => {
@@ -97,6 +103,36 @@ describe('ThrottleGuard', () => {
     await expect(guard.canActivate(ctxA)).resolves.toBe(true);
     await expect(guard.canActivate(ctxB)).resolves.toBe(true);
     await expect(guard.canActivate(ctxA)).rejects.toThrow();
+  });
+
+  it('keys buckets by bearer-token identity before route guards populate request.user', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'bearer-identity' });
+    const tokenFor = (id: string) => jwt.sign({ sub: id, type: 'user' }, JWT_SECRET);
+    const ctxA = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${tokenFor('user-a')}` } });
+    const ctxB = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${tokenFor('user-b')}` } });
+    await expect(guard.canActivate(ctxA)).resolves.toBe(true);
+    await expect(guard.canActivate(ctxB)).resolves.toBe(true);
+    await expect(guard.canActivate(ctxA)).rejects.toThrow();
+  });
+
+  it('falls back to IP for forged or invalid bearer tokens', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'bearer-invalid' });
+    const forged = jwt.sign({ sub: 'attacker', type: 'user' }, 'a-different-secret-of-similar-length');
+    const ctxA = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${forged}` } });
+    const ctxB = makeContext('127.0.0.1', { headers: { authorization: 'Bearer garbage' } });
+    await expect(guard.canActivate(ctxA)).resolves.toBe(true);
+    await expect(guard.canActivate(ctxB)).rejects.toThrow();
+  });
+
+  it('separates user and guest tokens that share the same subject id', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'bearer-type-split' });
+    const userToken = jwt.sign({ sub: 'same-id', type: 'user' }, JWT_SECRET);
+    const guestToken = jwt.sign({ sub: 'same-id', type: 'guest' }, JWT_SECRET);
+    const ctxUser = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${userToken}` } });
+    const ctxGuest = makeContext('127.0.0.1', { headers: { authorization: `Bearer ${guestToken}` } });
+    await expect(guard.canActivate(ctxUser)).resolves.toBe(true);
+    await expect(guard.canActivate(ctxGuest)).resolves.toBe(true);
+    await expect(guard.canActivate(ctxUser)).rejects.toThrow();
   });
 
   it('bounds the bucket map against rotating identities', async () => {

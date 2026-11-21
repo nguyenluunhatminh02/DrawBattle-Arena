@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { MatchService } from './match.service';
 import { OptionalAuthGuard } from '../auth/optional-auth.guard';
+import { Throttle } from '../../common/throttle.guard';
 import type { Request } from 'express';
 
 interface IdentityRequest extends Request {
@@ -21,11 +22,15 @@ export class MatchController {
   constructor(private readonly matchService: MatchService) {}
 
   @Get()
+  @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'match-list' })
   list(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.matchService.listMatches(
-      limit ? parseInt(limit, 10) : 20,
-      offset ? parseInt(offset, 10) : 0,
-    );
+    // Clamp client input here as well as in the service: negative/NaN offsets
+    // can otherwise skip arbitrary rows or turn into invalid Prisma queries.
+    const parsedLimit = Number.parseInt(limit ?? '20', 10);
+    const parsedOffset = Number.parseInt(offset ?? '0', 10);
+    const take = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 50) : 20;
+    const skip = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.min(parsedOffset, 10_000) : 0;
+    return this.matchService.listMatches(take, skip);
   }
 
   @Get('me')
@@ -42,11 +47,13 @@ export class MatchController {
   }
 
   @Get(':id')
+  @Throttle({ limit: 120, windowMs: 60_000, keyPrefix: 'match-detail' })
   details(@Param('id') id: string) {
     return this.matchService.getMatch(id);
   }
 
   @Get(':id/results')
+  @Throttle({ limit: 120, windowMs: 60_000, keyPrefix: 'match-results' })
   results(@Param('id') id: string) {
     return this.matchService.getMatchResults(id);
   }
