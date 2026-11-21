@@ -1,5 +1,15 @@
-import { Controller, Get, Post, Param, Res, HttpCode, HttpStatus } from '@nestjs/common';
-import { ReplayService } from './replay.service';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Res,
+  HttpCode,
+  HttpStatus,
+  Headers,
+  Query,
+} from '@nestjs/common';
+import { ReplayService, type ReplayReadContext } from './replay.service';
 import { Throttle } from '../../common/throttle.guard';
 import type { Response } from 'express';
 
@@ -7,28 +17,67 @@ import type { Response } from 'express';
 export class ReplayController {
   constructor(private readonly replayService: ReplayService) {}
 
+  /**
+   * The share link may be passed as `?share=<room code>` or in the
+   * `x-share-token` header. A room code grants UNLISTED access; signed share
+   * JWTs are verified by the service.
+   */
+  private readContext(
+    authorization?: string,
+    share?: string,
+    shareHeader?: string,
+  ): ReplayReadContext {
+    return { authorization, shareToken: share || shareHeader };
+  }
+
   // Specific routes must be declared before /:id so Nest does not shadow them.
   @Get('stats')
+  @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-stats' })
   async stats() {
     return this.replayService.getStats();
   }
 
   @Get('turn/:turnId')
-  async getByTurn(@Param('turnId') turnId: string) {
-    return this.replayService.getReplayByTurn(turnId);
+  @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-read' })
+  async getByTurn(
+    @Param('turnId') turnId: string,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ) {
+    return this.replayService.getReplayByTurn(
+      turnId,
+      this.readContext(authorization, share, shareHeader),
+    );
   }
 
   // Render status is cheap and can be polled after receiving 202 from /render.
   @Get(':id/render/status')
   @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-render-status' })
-  async getRenderStatus(@Param('id') id: string) {
-    return this.replayService.getRenderStatus(id);
+  async getRenderStatus(
+    @Param('id') id: string,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ) {
+    return this.replayService.getRenderStatus(
+      id,
+      this.readContext(authorization, share, shareHeader),
+    );
   }
 
   @Get('jobs/:jobId')
   @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-job-status' })
-  async getJobStatus(@Param('jobId') jobId: string) {
-    return this.replayService.getJobStatus(jobId);
+  async getJobStatus(
+    @Param('jobId') jobId: string,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ) {
+    return this.replayService.getJobStatus(
+      jobId,
+      this.readContext(authorization, share, shareHeader),
+    );
   }
 
   @Post(':id/render')
@@ -39,13 +88,32 @@ export class ReplayController {
   }
 
   @Get(':id/gif')
-  async getGif(@Param('id') id: string, @Res() res: Response) {
-    const gifUrl = await this.replayService.getGif(id);
+  @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-read' })
+  async getGif(
+    @Param('id') id: string,
+    @Res() res: Response,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ) {
+    const gifUrl = await this.replayService.getGif(
+      id,
+      this.readContext(authorization, share, shareHeader),
+    );
     return res.redirect(gifUrl);
   }
 
   @Get(':id')
-  async getReplay(@Param('id') id: string) {
-    return this.replayService.getReplay(id);
+  @Throttle({ limit: 60, windowMs: 60_000, keyPrefix: 'replay-read' })
+  async getReplay(
+    @Param('id') id: string,
+    @Headers('authorization') authorization?: string,
+    @Query('share') share?: string,
+    @Headers('x-share-token') shareHeader?: string,
+  ) {
+    return this.replayService.getReplay(
+      id,
+      this.readContext(authorization, share, shareHeader),
+    );
   }
 }
