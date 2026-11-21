@@ -483,6 +483,73 @@ describe('GameStateService settings persistence', () => {
     expect(events.some(event => event.type === 'room:snapshot')).toBe(true);
   });
 
+  it('classifies a room recreated during the DB write as ROOM_REPLACED, not MATCH_IN_PROGRESS', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    roomUpdate.mockImplementationOnce(() => gate.then(() => ({})));
+    const before = service.getSnapshot(roomId)?.settings;
+
+    const pending = service.updateSettings(roomId, 'host', { rounds: 3 });
+    await Promise.resolve();
+
+    // No match exists: the last player leaves and a new lifetime is created.
+    (service as any).rooms.delete(roomId);
+    service.initRoom(roomId, 'newHost', 'New Host', before as never);
+
+    release();
+    const result = await pending;
+    expect(result).toEqual({ ok: false, reason: 'ROOM_REPLACED' });
+    expect(isSettingsUpdateFailure(result, 'MATCH_IN_PROGRESS')).toBe(false);
+    expect(isSettingsUpdateFailure(result, 'ROOM_REPLACED')).toBe(true);
+    // The new lifetime keeps its own settings; only the DB received the write.
+    expect(service.getSnapshot(roomId)?.settings).toEqual(before);
+    expect(events.some(event => event.type === 'room:snapshot')).toBe(false);
+  });
+
+  it('does not commit settings after startMatch won the lock race', async () => {
+    // Exercise the real lock: hold it while startMatch is queued, then let
+    // startMatch run first and check that updateSettings aborts before its DB
+    // write rather than committing stale RAM after startMatch captured settings.
+    service.addPlayer(roomId, 'guest', 'Guest');
+    service.setReady(roomId, 'guest', true);
+    Object.assign(service as any, {
+      wordService: {
+        pickRandomWords: jest.fn().mockResolvedValue([
+          { id: 'word-1', canonical: 'mèo', difficulty: 'EASY', category: 'animals' },
+        ]),
+        getWordById: jest.fn().mockResolvedValue({ canonical: 'mèo', synonyms: [] }),
+        incrementUsage: jest.fn().mockResolvedValue(undefined),
+      },
+      featureFlags: { find: jest.fn().mockResolvedValue(null) },
+    });
+
+    let releaseLock!: () => void;
+    const lockGate = new Promise<void>(resolve => {
+      releaseLock = resolve;
+    });
+    // Seed a pending lock entry; withLock will chain both operations behind it.
+    (service as any).locks.set(roomId, lockGate);
+
+    const pendingStart = service.startMatch(roomId);
+    const pendingSettings = service.updateSettings(roomId, 'host', { rounds: 3 });
+    await Promise.resolve();
+    expect(roomUpdate).not.toHaveBeenCalled();
+
+    releaseLock();
+
+    await expect(pendingStart).resolves.toBe(true);
+    const result = await pendingSettings;
+    expect(result).toEqual({ ok: false, reason: 'MATCH_IN_PROGRESS' });
+    expect(roomUpdate).not.toHaveBeenCalledWith({
+      where: { id: roomId },
+      data: { settings: expect.objectContaining({ rounds: 3 }) },
+    });
+    expect(service.getSnapshot(roomId)?.settings).toMatchObject({ rounds: 1 });
+    expect(events.some(event => event.type === 'room:snapshot')).toBe(false);
+  });
+
   it('rejects a settings write that loses the lock race to startMatch', async () => {
     // Make this room able to run a real startMatch so the race is exercised
     // against the actual lock, not a hand-built match object.

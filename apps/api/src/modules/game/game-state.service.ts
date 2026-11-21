@@ -122,7 +122,18 @@ export type EventSink = (event: RoomEvent) => void;
 /** Discriminated settings-update result. Truthy for `ok: true`, falsy otherwise. */
 export type SettingsUpdateResult =
   | { ok: true; reason?: undefined }
-  | { ok: false; reason: 'ROOM_NOT_FOUND' | 'NOT_HOST' | 'MATCH_IN_PROGRESS' | 'SETTINGS_SAVE_FAILED' };
+  | {
+      ok: false;
+      reason:
+        | 'ROOM_NOT_FOUND'
+        | 'NOT_HOST'
+        | 'MATCH_IN_PROGRESS'
+        | 'SETTINGS_SAVE_FAILED'
+        // The DB write committed, but the room object was deleted/recreated
+        // while it was in flight (e.g. last player left). Settings are saved;
+        // the in-memory room simply no longer exists to update.
+        | 'ROOM_REPLACED';
+    };
 
 export type SettingsUpdateFailureReason = Extract<SettingsUpdateResult, { ok: false }>['reason'];
 
@@ -143,7 +154,14 @@ export class GameStateService {
   private readonly autoEndTimers = new Map<string, NodeJS.Timeout>();
   /** Pending room.status writes; awaited by startMatch so DB/memory cannot drift silently. */
   private readonly pendingStatusWrites = new Map<string, Promise<void>>();
-  /** Generations for rooms already removed from memory (e.g. last player left). */
+  /**
+   * Generations for rooms already removed from memory (e.g. last player left).
+   * These maps are keyed by room id, the same domain as `rooms`/`locks`, and
+   * entries are short-lived: the next write supersedes a generation, and
+   * `locks` deletes itself once the last queued operation settles. Each
+   * lifetime is bounded by that room's own activity, so no extra eviction is
+   * needed without an unbounded stream of one-shot room ids.
+   */
   private readonly retiredStatusGenerations = new Map<string, number>();
 
   constructor(
@@ -159,6 +177,30 @@ export class GameStateService {
 
   unregisterSink(roomId: string) {
     this.sinks.delete(roomId);
+  }
+
+  /**
+   * Classifies a settings/lifecycle conflict without treating room deletion
+   * (delete/recreate with no match) as a match-in-progress rejection.
+   */
+  private classifySettingsConflict(
+    roomId: string,
+    room: RoomState,
+  ): Extract<SettingsUpdateResult, { ok: false }> {
+    const current = this.rooms.get(roomId);
+    if (current && current.match) return { ok: false, reason: 'MATCH_IN_PROGRESS' };
+    if (current !== room) return { ok: false, reason: 'ROOM_REPLACED' };
+    return { ok: false, reason: 'MATCH_IN_PROGRESS' };
+  }
+
+  /** Observes a fire-and-forget transition so its rejection never escapes. */
+  private observe(task: Promise<unknown>, context: string, roomId: string): void {
+    void task.catch(err => {
+      this.logger.error(
+        `${context} failed for room ${roomId}`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   }
 
   private withLock<T>(roomId: string, fn: () => Promise<T>): Promise<T> {
@@ -314,7 +356,7 @@ export class GameStateService {
           if (turn.correctGuessers.size < eligible.length) {
             const remaining = Math.max(0, turn.endsAt - Date.now());
             if (turn.timer) clearTimeout(turn.timer);
-            turn.timer = setTimeout(() => void this.endTurn(roomId), remaining);
+            turn.timer = setTimeout(() => this.observe(this.endTurn(roomId), 'endTurn', roomId), remaining);
           }
         }
       }
@@ -367,7 +409,7 @@ export class GameStateService {
       this.unregisterSink(roomId);
       // Bounded retry with a generation guard: a slow retry must not
       // resurrect a PLAYING status after the room has been recreated.
-      void this.writeRoomStatus(roomId, 'WAITING');
+      this.observe(this.writeRoomStatus(roomId, 'WAITING'), 'room status reset', roomId);
       return null;
     }
 
@@ -391,7 +433,7 @@ export class GameStateService {
           turn.timer = null;
           turn.hintTimers = [];
         }
-        void this.endMatch(roomId);
+        this.observe(this.endMatch(roomId), 'endMatch', roomId);
       } else if (wasActiveDrawer) {
         this.abortCurrentTurn(roomId);
       }
@@ -594,13 +636,13 @@ export class GameStateService {
       room.match.currentDrawerIndex++;
       skips++;
       if (room.match.currentDrawerIndex >= room.match.totalTurns) {
-        void this.endMatch(roomId);
+        this.observe(this.endMatch(roomId), 'endMatch', roomId);
         return;
       }
       drawerId = room.match.drawerOrder[room.match.currentDrawerIndex % room.match.drawerOrder.length];
     }
     if (!room.players.has(drawerId)) {
-      void this.endMatch(roomId);
+      this.observe(this.endMatch(roomId), 'endMatch', roomId);
       return;
     }
     const options =
@@ -745,7 +787,7 @@ export class GameStateService {
     }
 
     turn.timer = setTimeout(() => {
-      void this.endTurn(roomId);
+      this.observe(this.endTurn(roomId), 'endTurn', roomId);
     }, timeLimit * 1000);
   }
 
@@ -837,6 +879,13 @@ export class GameStateService {
       if (typeof patch.category === 'string') {
         next.category = patch.category || undefined;
       }
+      // A startMatch queued on this room's lock cannot enter while we hold it.
+      // Check immediately before dispatching the DB write so a match that
+      // started during an earlier await (e.g. a flag lookup) is never followed
+      // by a committed settings change that RAM does not reflect.
+      if (this.rooms.get(roomId) !== room || room.match) {
+        return this.classifySettingsConflict(roomId, room);
+      }
       try {
         await this.prisma.room.update({
           where: { id: roomId },
@@ -850,9 +899,10 @@ export class GameStateService {
       // A startMatch queued on this room's lock may have begun while the DB call
       // was in flight. The lock serializes the transition, but the match check
       // must be repeated before committing so settings cannot change after
-      // startMatch captured them for the new match.
+      // startMatch captured them for the new match. Deletion/recreation (no
+      // match) is classified separately, since settings were persisted fine.
       if (this.rooms.get(roomId) !== room || room.match) {
-        return { ok: false, reason: 'MATCH_IN_PROGRESS' } as const;
+        return this.classifySettingsConflict(roomId, room);
       }
 
       // Only commit the in-memory settings after the DB accepted them, so a
@@ -932,7 +982,7 @@ export class GameStateService {
         // period can clear/re-evaluate it (eligible guesser count increased).
         this.autoEndTimers.set(roomId, setTimeout(() => {
           this.autoEndTimers.delete(roomId);
-          void this.endTurn(roomId);
+          this.observe(this.endTurn(roomId), 'endTurn', roomId);
         }, 1500));
       }
 
@@ -1010,7 +1060,7 @@ export class GameStateService {
     }
     room.match.turn = null;
     this.emit(roomId, { type: 'match:phaseChanged', payload: { phase: 'NEXT_TURN' } });
-    setTimeout(() => this.transitionToNextTurn(roomId), 1000);
+    setTimeout(() => this.observe(Promise.resolve(this.transitionToNextTurn(roomId)), 'transitionToNextTurn', roomId), 1000);
   }
 
   private async endTurn(roomId: string) {
@@ -1068,7 +1118,7 @@ export class GameStateService {
     const revealDuration = modeConfig.revealDuration;
 
     setTimeout(() => {
-      void this.transitionToNextTurn(roomId);
+      this.observe(Promise.resolve(this.transitionToNextTurn(roomId)), 'transitionToNextTurn', roomId);
     }, revealDuration * 1000);
   }
 
@@ -1081,7 +1131,7 @@ export class GameStateService {
     const completedTurns = room.match.currentDrawerIndex;
 
     if (completedTurns >= totalTurns) {
-      void this.endMatch(roomId);
+      this.observe(this.endMatch(roomId), 'endMatch', roomId);
       return;
     }
 
@@ -1092,7 +1142,7 @@ export class GameStateService {
     this.emit(roomId, { type: 'match:phaseChanged', payload: { phase: 'NEXT_TURN' } });
 
     setTimeout(() => {
-      void this.startWordPickPhase(roomId);
+      this.observe(this.startWordPickPhase(roomId), 'startWordPickPhase', roomId);
     }, 2000);
   }
 
@@ -1220,7 +1270,7 @@ export class GameStateService {
         }
       }
 
-      void this.writeRoomStatus(roomId, 'WAITING');
+      this.observe(this.writeRoomStatus(roomId, 'WAITING'), 'room status reset', roomId);
     });
   }
 

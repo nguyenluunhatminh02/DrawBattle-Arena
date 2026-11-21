@@ -1031,6 +1031,12 @@ export class GameSocketGateway
     if (!result.ok) {
       if (isSettingsUpdateFailure(result, 'MATCH_IN_PROGRESS')) {
         socket.emit('error', 'SETTINGS_FAILED', 'Cannot update settings during a match');
+      } else if (isSettingsUpdateFailure(result, 'ROOM_REPLACED')) {
+        // The DB write committed, but the room lifetime changed mid-flight
+        // (e.g. delete/recreate). This is not a match conflict: use a safe
+        // generic code and log only for server-side diagnosis.
+        this.logger.warn(`Settings update raced a room replacement for ${roomId}`);
+        socket.emit('error', 'SETTINGS_SAVE_FAILED', 'Could not save settings');
       } else {
         // A persistence failure (or any other internal reason) must not be
         // reported as a match-in-progress rejection, and DB details must never

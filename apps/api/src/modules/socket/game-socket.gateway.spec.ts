@@ -492,6 +492,31 @@ describe('GameSocketGateway settings update errors', () => {
     expect(socket.emit).not.toHaveBeenCalledWith('error', 'SETTINGS_SAVE_FAILED', expect.anything());
   });
 
+  it('does not report a recreated room as a match-in-progress failure', async () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeHostSocket(gateway);
+    game.updateSettings.mockResolvedValue({ ok: false, reason: 'ROOM_REPLACED' });
+
+    await gateway.onUpdateSettings(socket, { rounds: 3 });
+
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SETTINGS_SAVE_FAILED', 'Could not save settings');
+    expect(socket.emit).not.toHaveBeenCalledWith('error', 'SETTINGS_FAILED', expect.anything());
+  });
+
+  it('never forwards raw database error text to the client', async () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeHostSocket(gateway);
+    const secret = 'server=db.internal user=admin password=hunter2';
+    game.updateSettings.mockResolvedValue({ ok: false, reason: 'SETTINGS_SAVE_FAILED', detail: secret });
+
+    await gateway.onUpdateSettings(socket, { rounds: 3 });
+
+    for (const call of (socket.emit as jest.Mock).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain(secret);
+    }
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SETTINGS_SAVE_FAILED', 'Could not save settings');
+  });
+
   it('emits a generic safe failure for non-match internal reasons', async () => {
     const { gateway, game } = makeGateway();
     const socket = makeHostSocket(gateway);
