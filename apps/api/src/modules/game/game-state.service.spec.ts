@@ -146,22 +146,27 @@ describe('GameStateService room status persistence', () => {
   const roomId = 'room-status';
   let service: GameStateService;
   let roomUpdate: jest.Mock;
+  let pickRandomWords: jest.Mock;
+  let flags: { find: jest.Mock };
 
   const setup = () => {
     roomUpdate = jest.fn().mockResolvedValue({});
+    pickRandomWords = jest.fn().mockResolvedValue([
+      { id: 'word-1', canonical: 'mèo', difficulty: 'EASY', category: 'animals' },
+    ]);
+    flags = { find: jest.fn().mockResolvedValue(null) };
     const prisma = {
       room: { update: roomUpdate },
       match: { create: jest.fn() },
     };
     service = new GameStateService(
       {
-        pickRandomWords: jest.fn().mockResolvedValue([
-          { id: 'word-1', canonical: 'mèo', difficulty: 'EASY', category: 'animals' },
-        ]),
+        pickRandomWords,
         getWordById: jest.fn().mockResolvedValue({ canonical: 'mèo', synonyms: [] }),
+        incrementUsage: jest.fn().mockResolvedValue(undefined),
       } as never,
       prisma as never,
-      { find: jest.fn().mockResolvedValue(null) } as never,
+      flags as never,
     );
     service.initRoom(roomId, 'host', 'Host', {
       mode: 'CLASSIC',
@@ -182,7 +187,14 @@ describe('GameStateService room status persistence', () => {
     const turn = (service as any).rooms.get(roomId)?.match?.turn;
     if (turn?.timer) clearTimeout(turn.timer);
     for (const t of turn?.hintTimers ?? []) clearTimeout(t);
+    // clear the room entirely so no delayed word-pick timer can fire after
+    // the test (those callbacks would call collaborators absent from stubs).
+    (service as any).rooms.delete(roomId);
   });
+
+  // writeRoomStatus chains on previous writes, so dispatch happens a few
+  // microtasks later; a macrotask flush makes the assertions deterministic.
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
   it('awaits the PLAYING status write before startMatch resolves', async () => {
     let release!: () => void;
@@ -196,8 +208,7 @@ describe('GameStateService room status persistence', () => {
       started = true;
       return result;
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await flush();
     expect(started).toBe(false);
     expect(roomUpdate).toHaveBeenCalledWith({
       where: { id: roomId },
@@ -244,5 +255,159 @@ describe('GameStateService room status persistence', () => {
     const started = service.startMatch(roomId);
     await expect(started).resolves.toBe(false);
     expect(roomUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls back to WAITING when word pick setup fails after PLAYING was persisted', async () => {
+    jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+    pickRandomWords.mockRejectedValueOnce(new Error('word service down'));
+
+    await expect(service.startMatch(roomId)).resolves.toBe(false);
+    expect(roomUpdate).toHaveBeenNthCalledWith(1, {
+      where: { id: roomId },
+      data: { status: 'PLAYING' },
+    });
+    expect(roomUpdate).toHaveBeenNthCalledWith(2, {
+      where: { id: roomId },
+      data: { status: 'WAITING' },
+    });
+    expect((service as any).rooms.get(roomId).match).toBeNull();
+  });
+
+  it('prepares feature flags before persisting PLAYING', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    flags.find.mockImplementationOnce(() => gate.then(() => null));
+
+    const pending = service.startMatch(roomId);
+    await Promise.resolve();
+    expect(flags.find).toHaveBeenCalledWith('classic_turn_duration');
+    expect(roomUpdate).not.toHaveBeenCalled();
+
+    release();
+    await expect(pending).resolves.toBe(true);
+    expect(roomUpdate).toHaveBeenCalledWith({
+      where: { id: roomId },
+      data: { status: 'PLAYING' },
+    });
+  });
+
+  it('serializes status writes instead of dispatching them eagerly', async () => {
+    const writeStatus = (status: 'PLAYING' | 'WAITING') =>
+      (service as any).writeRoomStatus(roomId, status) as Promise<void>;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    roomUpdate.mockImplementationOnce(() => firstGate.then(() => ({})));
+
+    const first = writeStatus('PLAYING');
+    await flush();
+    expect(roomUpdate).toHaveBeenCalledTimes(1);
+    expect(roomUpdate).toHaveBeenLastCalledWith({
+      where: { id: roomId },
+      data: { status: 'PLAYING' },
+    });
+
+    // Enqueued while the first write is in flight: it must not run early.
+    const second = writeStatus('WAITING');
+    await flush();
+    expect(roomUpdate).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(roomUpdate).toHaveBeenCalledTimes(2);
+    expect(roomUpdate).toHaveBeenNthCalledWith(2, {
+      where: { id: roomId },
+      data: { status: 'WAITING' },
+    });
+  });
+
+  it('skips a queued status write that became stale before its turn', async () => {
+    const writeStatus = (status: 'PLAYING' | 'WAITING') =>
+      (service as any).writeRoomStatus(roomId, status) as Promise<void>;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    roomUpdate.mockImplementationOnce(() => firstGate.then(() => ({})));
+
+    const first = writeStatus('PLAYING');
+    await flush();
+    const stale = writeStatus('WAITING');
+    // Supersede the queued WAITING transition before it is dispatched.
+    const latest = writeStatus('PLAYING');
+    releaseFirst();
+    await Promise.all([first, stale, latest]);
+
+    expect(roomUpdate).toHaveBeenCalledTimes(2);
+    expect(roomUpdate).toHaveBeenNthCalledWith(1, {
+      where: { id: roomId },
+      data: { status: 'PLAYING' },
+    });
+    expect(roomUpdate).toHaveBeenNthCalledWith(2, {
+      where: { id: roomId },
+      data: { status: 'PLAYING' },
+    });
+  });
+});
+
+describe('GameStateService settings persistence', () => {
+  const roomId = 'room-settings';
+  let service: GameStateService;
+  let roomUpdate: jest.Mock;
+  let events: RoomEvent[];
+
+  beforeEach(() => {
+    roomUpdate = jest.fn().mockResolvedValue({});
+    service = new GameStateService(
+      {} as never,
+      { room: { update: roomUpdate }, match: { create: jest.fn() } } as never,
+      {} as never,
+    );
+    service.initRoom(roomId, 'host', 'Host', {
+      mode: 'CLASSIC',
+      maxPlayers: 2,
+      rounds: 1,
+      turnDuration: 60,
+      difficulty: 'MIXED',
+      enableHints: false,
+    } as never);
+    events = [];
+    service.registerSink(roomId, event => events.push(event));
+  });
+
+  it('does not mutate in-memory settings or emit a snapshot when persistence fails', async () => {
+    roomUpdate.mockRejectedValueOnce(new Error('db down'));
+    jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
+    const before = service.getSnapshot(roomId)?.settings;
+
+    await expect(
+      service.updateSettings(roomId, 'host', { rounds: 3, turnDuration: 90, enableHints: true }),
+    ).resolves.toBe(false);
+
+    expect(service.getSnapshot(roomId)?.settings).toEqual(before);
+    expect(events.some(event => event.type === 'room:snapshot')).toBe(false);
+    expect(roomUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('commits settings and emits a snapshot only after the database accepts them', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    roomUpdate.mockImplementationOnce(() => gate.then(() => ({})));
+    const before = service.getSnapshot(roomId)?.settings;
+
+    const pending = service.updateSettings(roomId, 'host', { rounds: 3 });
+    await Promise.resolve();
+    expect(service.getSnapshot(roomId)?.settings).toEqual(before);
+    expect(events).toHaveLength(0);
+
+    release();
+    await expect(pending).resolves.toBe(true);
+    expect(service.getSnapshot(roomId)?.settings).toMatchObject({ rounds: 3 });
+    expect(events.some(event => event.type === 'room:snapshot')).toBe(true);
   });
 });

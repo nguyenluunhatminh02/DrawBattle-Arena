@@ -128,6 +128,8 @@ export class GameStateService {
   private readonly autoEndTimers = new Map<string, NodeJS.Timeout>();
   /** Pending room.status writes; awaited by startMatch so DB/memory cannot drift silently. */
   private readonly pendingStatusWrites = new Map<string, Promise<void>>();
+  /** Generations for rooms already removed from memory (e.g. last player left). */
+  private readonly retiredStatusGenerations = new Map<string, number>();
 
   constructor(
     private readonly wordService: WordService,
@@ -167,11 +169,33 @@ export class GameStateService {
    */
   private writeRoomStatus(roomId: string, status: 'PLAYING' | 'WAITING'): Promise<void> {
     const room = this.rooms.get(roomId);
-    const generation = (room?.statusGeneration ?? 0) + 1;
+    const generation = Math.max(room?.statusGeneration ?? 0, this.retiredStatusGenerations.get(roomId) ?? 0) + 1;
     if (room) room.statusGeneration = generation;
+    else this.retiredStatusGenerations.set(roomId, generation);
 
-    const write = (async () => {
+    const isCurrent = () =>
+      (this.rooms.get(roomId)?.statusGeneration ?? this.retiredStatusGenerations.get(roomId) ?? 0) === generation;
+    const skipStale = () => {
+      this.logger.warn(
+        `Skipped stale room status write ${status} for ${roomId} after generation change`,
+      );
+    };
+
+    const previous = this.pendingStatusWrites.get(roomId) ?? Promise.resolve();
+    // The update must be dispatched only once the previous write has settled,
+    // and only while this transition is still the newest one.
+    const chained = previous.catch(() => undefined).then(async () => {
+      if (!isCurrent()) {
+        skipStale();
+        return;
+      }
       for (let attempt = 0; attempt < STATUS_WRITE_ATTEMPTS; attempt++) {
+        // A retry must not resurrect a status superseded while the DB call was
+        // in flight.
+        if (!isCurrent()) {
+          skipStale();
+          return;
+        }
         try {
           await this.prisma.room.update({
             where: { id: roomId },
@@ -192,19 +216,7 @@ export class GameStateService {
           await new Promise(resolve => setTimeout(resolve, STATUS_RETRY_BASE_DELAY_MS * (attempt + 1)));
         }
       }
-    })().then(() => {
-      // Drop the generation guard only if no newer transition superseded this
-      // write. A stale retry that failed must not overwrite a newer status.
-      const current = this.rooms.get(roomId);
-      if (current?.statusGeneration !== generation) {
-        this.logger.warn(
-          `Skipped stale room status write ${status} for ${roomId} after generation change`,
-        );
-      }
     });
-
-    const previous = this.pendingStatusWrites.get(roomId) ?? Promise.resolve();
-    const chained = previous.then(() => write);
     this.pendingStatusWrites.set(roomId, chained);
     const clearPending = () => {
       if (this.pendingStatusWrites.get(roomId) === chained) {
@@ -254,6 +266,9 @@ export class GameStateService {
       settings,
       match: null,
     });
+    // A recreated room starts a fresh generation; any still-pending write from
+    // the previous room's lifetime is stale and must not be applied.
+    this.retiredStatusGenerations.delete(roomId);
   }
 
   addPlayer(roomId: string, id: string, nickname: string): PlayerInfo | null {
@@ -428,26 +443,9 @@ export class GameStateService {
       if (eligible.some(p => p.id !== room.hostId && !p.isReady)) return false;
       if (room.match) return false;
 
-      room.match = { id: '__starting__', rounds: 0, totalTurns: 0, currentRound: 0, drawerOrder: [], currentDrawerIndex: 0, turn: null, completedTurns: [], startedAt: Date.now() } as MatchState;
-
-      try {
-        // Drain any prior status transition (e.g. endMatch -> WAITING) before
-        // writing PLAYING, so the DB and in-memory state cannot drift when a
-        // rematch starts immediately after the previous match finished.
-        await this.flushStatusWrites(roomId);
-        // Await the queued write before touching in-memory match state so a
-        // DB failure cannot leave the room silently PLAYING in one store only.
-        await this.writeRoomStatus(roomId, 'PLAYING');
-      } catch (err) {
-        // Roll back in-memory state so DB and memory do not drift.
-        room.match = null;
-        this.logger.error(
-          `startMatch aborted for ${roomId}: status write failed`,
-          err instanceof Error ? err.message : String(err),
-        );
-        return false;
-      }
-
+      // Prepare everything that can fail before persisting PLAYING, so an init
+      // failure never leaves the room PLAYING in the DB but WAITING in memory.
+      let nextMatch: MatchState;
       try {
         let turnDuration =
           room.settings.mode === 'SPEED' || room.settings.mode === 'DUEL'
@@ -467,12 +465,11 @@ export class GameStateService {
         }
 
         const drawerOrder = this.shuffle(eligible.slice(0, modeConfig.maxPlayers).map(p => p.id));
-        const matchId = uuid();
         const rounds = room.settings.mode === 'DUEL' ? modeConfig.rounds : room.settings.rounds;
         const totalTurns =
           room.settings.mode === 'DUEL' ? modeConfig.rounds : rounds * drawerOrder.length;
-        room.match = {
-          id: matchId,
+        nextMatch = {
+          id: uuid(),
           rounds,
           totalTurns,
           currentRound: 1,
@@ -485,8 +482,42 @@ export class GameStateService {
           startedAt: Date.now(),
         };
       } catch (err) {
-        room.match = null;
         this.logger.error(`startMatch init failed for ${roomId}`, err instanceof Error ? err.message : String(err));
+        return false;
+      }
+
+      room.match = nextMatch;
+      try {
+        // Drain any prior status transition (e.g. endMatch -> WAITING) before
+        // writing PLAYING, so the DB and in-memory state cannot drift when a
+        // rematch starts immediately after the previous match finished.
+        await this.flushStatusWrites(roomId);
+        await this.writeRoomStatus(roomId, 'PLAYING');
+      } catch (err) {
+        room.match = null;
+        this.logger.error(
+          `startMatch aborted for ${roomId}: status write failed`,
+          err instanceof Error ? err.message : String(err),
+        );
+        return false;
+      }
+
+      try {
+        await this.startWordPickPhase(roomId);
+      } catch (err) {
+        // PLAYING is already in the DB: compensate rather than leaving a
+        // phantom PLAYING room with no match state. Awaiting keeps the rollback
+        // ordered ahead of a subsequent rematch's status writes.
+        room.match = null;
+        this.logger.error(`startMatch word pick setup failed for ${roomId}`, err instanceof Error ? err.message : String(err));
+        try {
+          await this.writeRoomStatus(roomId, 'WAITING');
+        } catch (rollbackErr) {
+          this.logger.error(
+            `startMatch failed to roll back status for ${roomId}`,
+            rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          );
+        }
         return false;
       }
 
@@ -768,8 +799,6 @@ export class GameStateService {
     if (typeof patch.category === 'string') {
       next.category = patch.category || undefined;
     }
-    room.settings = next;
-
     try {
       await this.prisma.room.update({
         where: { id: roomId },
@@ -777,8 +806,12 @@ export class GameStateService {
       });
     } catch (err) {
       this.logger.error(`Failed to persist settings for room ${roomId}`, err instanceof Error ? err.message : String(err));
+      return false;
     }
 
+    // Only commit the in-memory settings after the DB accepted them, so a
+    // failed update cannot make RAM and the database disagree.
+    room.settings = next;
     this.emit(roomId, { type: 'room:snapshot', payload: this.getSnapshot(roomId) });
     return true;
   }
