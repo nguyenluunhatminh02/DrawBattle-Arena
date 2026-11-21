@@ -38,6 +38,8 @@ interface DisconnectTimer {
 interface ActiveMembership {
   generation: number;
   socketId: string;
+  /** Password accepted for this slot's live join, kept only for DB compensation. */
+  verifiedPassword?: string;
 }
 
 interface JoinBuild {
@@ -59,6 +61,12 @@ interface JoinAttempt {
   /** Verified identity from the socket session, used before playerId is known. */
   identityKey?: string;
   playerId?: string;
+  /**
+   * Password supplied by this socket's live join, later verified by
+   * RoomService.joinRoom. Kept in host memory only so compensation can reuse
+   * already-validated credentials; never emitted or logged.
+   */
+  verifiedPassword?: string;
   invalidated: boolean;
   disconnected: boolean;
   dbRowOwned: boolean;
@@ -187,10 +195,9 @@ export class GameSocketGateway
     socketId?: string,
     generation?: number,
   ): boolean {
-    const current = this.disconnectTimers.get(playerId);
-    if (!current || current.roomId !== roomId || current.playerId !== playerId) {
-      return false;
-    }
+    const key = GameSocketGateway.disconnectTimerKey(roomId, playerId);
+    const current = this.disconnectTimers.get(key);
+    if (!current) return false;
     if (socketId !== undefined && current.socketId !== socketId) {
       return false;
     }
@@ -199,12 +206,17 @@ export class GameSocketGateway
       return false;
     }
     clearTimeout(current.timer);
-    this.disconnectTimers.delete(playerId);
+    this.disconnectTimers.delete(key);
     return true;
   }
 
   private static membershipKey(roomId: string, playerId: string): string {
     return `${roomId}\u0000${playerId}`;
+  }
+
+  /** Grace timers are scoped by room and player: switching rooms never cancels another room's timer. */
+  private static disconnectTimerKey(roomId: string, playerId: string): string {
+    return GameSocketGateway.membershipKey(roomId, playerId);
   }
 
   /** Read the current ownership token for a player slot. */
@@ -229,17 +241,23 @@ export class GameSocketGateway
   }
 
   /** Claim the slot for a new socket and bump its generation. */
-  private claimMembership(roomId: string, playerId: string, socketId: string): number {
+  private claimMembership(
+    roomId: string,
+    playerId: string,
+    socketId: string,
+    verifiedPassword?: string,
+  ): number {
     const generation = ++this.membershipGeneration;
     this.activeMemberships.set(GameSocketGateway.membershipKey(roomId, playerId), {
       generation,
       socketId,
+      verifiedPassword,
     });
     return generation;
   }
 
   /** Reserve a token for an in-flight join before any DB await. */
-  private beginJoinAttempt(socket: AuthedSocket, roomId: string): number {
+  private beginJoinAttempt(socket: AuthedSocket, roomId: string, password?: string): number {
     const generation = ++this.membershipGeneration;
     const identityKey = socket.data.sessionId || socket.data.userId;
     this.joinAttempts.set(socket.id, generation);
@@ -248,6 +266,7 @@ export class GameSocketGateway
       socketId: socket.id,
       roomId,
       identityKey,
+      verifiedPassword: password,
       invalidated: false,
       disconnected: socket.disconnected === true,
       dbRowOwned: false,
@@ -371,11 +390,12 @@ export class GameSocketGateway
    */
   private commitJoin(socket: AuthedSocket, build: JoinBuild): boolean {
     const { roomId, playerId, roomCode, generation, joinedPlayer } = build;
+    const verifiedPassword = this.getJoinAttempt(generation)?.verifiedPassword;
     // Another socket may have claimed this player slot during an await.
     if (!this.canClaimMembership(roomId, playerId, socket.id)) return false;
     if (!this.ownsJoinAttempt(socket.id, generation)) return false;
     if (socket.disconnected) return false;
-    this.claimMembership(roomId, playerId, socket.id);
+    this.claimMembership(roomId, playerId, socket.id, verifiedPassword);
     // Only cancel the grace timer owned by this socket; a timer for a
     // different socket must keep its period.
     this.clearDisconnectTimer(roomId, playerId, socket.id);
@@ -493,6 +513,7 @@ export class GameSocketGateway
     socket: AuthedSocket,
     roomId: string,
     playerId: string,
+    password?: string,
   ): Promise<void> {
     const roomCode = socket.data.roomCode;
     const nickname = socket.data.nickname;
@@ -503,6 +524,7 @@ export class GameSocketGateway
         nickname,
         socket.data.identityType === 'guest' ? socket.data.sessionId! : null,
         socket.data.identityType === 'user' ? socket.data.userId! : null,
+        password,
       );
       if (rejoined.roomId !== roomId || rejoined.playerId !== playerId) {
         this.logger.warn(`Could not reactivate superseded row for ${playerId}: wrong membership`);
@@ -645,7 +667,9 @@ export class GameSocketGateway
     if (roomId && playerId) {
       const roomMap = this.roomSockets.get(roomId);
       const currentSocket = roomMap?.get(playerId);
-      const pendingTimer = this.disconnectTimers.get(playerId);
+      const pendingTimer = this.disconnectTimers.get(
+        GameSocketGateway.disconnectTimerKey(roomId, playerId),
+      );
       // Only the socket still registered as this player's active member may
       // tear down membership. A replaced (or already evicted) socket must not
       // mark the live socket offline, cancel its grace timer or delete it from
@@ -677,6 +701,7 @@ export class GameSocketGateway
         }
       }
       this.broadcastRoomUpdate(roomId);
+      const timerKey = GameSocketGateway.disconnectTimerKey(roomId, playerId);
       const timer = setTimeout(async () => {
         // A reconnect may have already replaced this socket before the timer
         // callback started. Never persist a leave for a row that now belongs
@@ -685,10 +710,10 @@ export class GameSocketGateway
         if (
           (beforeMembership && (beforeMembership.socketId !== ownerSocketId ||
             (generation !== undefined && beforeMembership.generation !== generation))) ||
-          this.disconnectTimers.get(playerId) !== current
+          this.disconnectTimers.get(timerKey) !== current
         ) {
-          if (current === this.disconnectTimers.get(playerId)) {
-            this.disconnectTimers.delete(playerId);
+          if (current === this.disconnectTimers.get(timerKey)) {
+            this.disconnectTimers.delete(timerKey);
           }
           return;
         }
@@ -714,10 +739,14 @@ export class GameSocketGateway
         if (
           (currentMembership && (currentMembership.socketId !== ownerSocketId ||
             (generation !== undefined && currentMembership.generation !== generation))) ||
-          this.disconnectTimers.get(playerId) !== current
+          this.disconnectTimers.get(timerKey) !== current
         ) {
           if (!leaveFailed) {
-            await this.reactivateLeftDbRow(socket, roomId, playerId);
+            // Reuse only credentials stored with the membership that won this
+            // slot. Attempt tokens are gone after commit; the disconnected
+            // socket's credentials are never used for compensation.
+            const winner = this.getMembership(roomId, playerId);
+            await this.reactivateLeftDbRow(socket, roomId, playerId, winner?.verifiedPassword);
           }
           return;
         }
@@ -725,14 +754,14 @@ export class GameSocketGateway
         this.game.removePlayer(roomId, playerId);
         this.server.to(roomId).emit('room:playerLeft', playerId);
         this.broadcastRoomUpdate(roomId);
-        if (current === this.disconnectTimers.get(playerId)) {
-          this.disconnectTimers.delete(playerId);
+        if (current === this.disconnectTimers.get(timerKey)) {
+          this.disconnectTimers.delete(timerKey);
         }
         socket.data.roomId = undefined;
         socket.data.playerId = undefined;
       }, 15_000);
-      // A newer socket for this player supersedes any older disconnect timer.
-      this.clearDisconnectTimer(roomId, playerId);
+      // A newer socket for this player supersedes any older timer in THIS room.
+      this.clearDisconnectTimer(roomId, playerId, ownerSocketId);
       const current: DisconnectTimer = {
         timer,
         roomId,
@@ -740,7 +769,7 @@ export class GameSocketGateway
         socketId: ownerSocketId,
         generation,
       };
-      this.disconnectTimers.set(playerId, current);
+      this.disconnectTimers.set(timerKey, current);
     }
   }
 
@@ -813,7 +842,11 @@ export class GameSocketGateway
 
       // Reserve a token before the DB await. The player slot is registered
       // right away when it is already known from this socket or the room.
-      const generation = this.beginJoinAttempt(socket, room.id);
+      const generation = this.beginJoinAttempt(
+        socket,
+        room.id,
+        typeof data.password === 'string' ? data.password : undefined,
+      );
       const knownPlayerId = socket.data.roomId === room.id ? socket.data.playerId : undefined;
       if (knownPlayerId) {
         this.setJoinAttemptTarget(generation, room.id, knownPlayerId);
@@ -842,7 +875,7 @@ export class GameSocketGateway
         // The DB join can land while the previous socket's disconnect is still
         // pending. Its grace timer (or a superseded join's rollback) must never
         // persist a leave for the slot this attempt just acquired.
-        this.clearDisconnectTimer(joined.roomId, joined.playerId);
+        this.clearDisconnectTimer(joined.roomId, joined.playerId, undefined, undefined);
         this.setJoinAttemptTarget(generation, joined.roomId, joined.playerId);
         // An in-flight join from the socket being replaced can still be inside
         // its own DB await. Supersede it here so its rollback cannot release
@@ -875,7 +908,7 @@ export class GameSocketGateway
         if (!this.canClaimMembership(joined.roomId, joined.playerId, socket.id)) {
           throw new Error('Room join superseded');
         }
-        this.claimMembership(joined.roomId, joined.playerId, socket.id);
+        this.claimMembership(joined.roomId, joined.playerId, socket.id, attempt.verifiedPassword);
 
         if (!this.game.getSnapshot(joined.roomId)) {
           const dbRoom = await this.roomService.getRoomById(joined.roomId);
@@ -1231,7 +1264,9 @@ export class GameSocketGateway
         // before any await. A slow banPlayer must not cancel a grace timer
         // installed by a newer replacement socket for the same player. For an
         // already-disconnected target the pending timer is the ownership token.
-        const kickedTimer = this.disconnectTimers.get(data.targetId);
+        const kickedTimer = this.disconnectTimers.get(
+          GameSocketGateway.disconnectTimerKey(roomId, data.targetId),
+        );
         const kickedSocketId = targetSocket?.id ?? kickedTimer?.socketId;
         const kickedGeneration =
           this.getMembership(roomId, data.targetId)?.generation ?? kickedTimer?.generation;

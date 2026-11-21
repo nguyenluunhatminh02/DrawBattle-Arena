@@ -11,6 +11,10 @@ type SocketData = {
   roomCode?: string;
 };
 
+function authedDataFor(sessionId: string): SocketData {
+  return { identityType: 'guest', sessionId, nickname: 'Player' };
+}
+
 function makeSocket(id: string, data: SocketData = {}) {
   return {
     id,
@@ -148,11 +152,11 @@ describe('GameSocketGateway kick and disconnect timers', () => {
     const stale = makeSocket('stale-socket', { playerId: 'p1', roomId: 'room-1', sessionId: 's1' });
     (gateway as any).roomSockets.set('room-1', new Map([['p1', live]]));
     gateway.handleDisconnect(live);
-    const liveTimer = (gateway as any).disconnectTimers.get('p1');
+    const liveTimer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
 
     gateway.handleDisconnect(stale);
 
-    expect((gateway as any).disconnectTimers.get('p1')).toBe(liveTimer);
+    expect((gateway as any).disconnectTimers.get('room-1\u0000p1')).toBe(liveTimer);
   });
 
   it('does not clear a matching-player timer recorded for another room', () => {
@@ -160,12 +164,41 @@ describe('GameSocketGateway kick and disconnect timers', () => {
     const socket = makeSocket('live-socket', { playerId: 'p1', roomId: 'room-1' });
     (gateway as any).roomSockets.set('room-1', new Map([['p1', socket]]));
     gateway.handleDisconnect(socket);
-    const timer = (gateway as any).disconnectTimers.get('p1');
+    const timer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
 
     expect((gateway as any).clearDisconnectTimer('other-room', 'p1')).toBe(false);
-    expect((gateway as any).disconnectTimers.get('p1')).toBe(timer);
+    expect((gateway as any).disconnectTimers.get('room-1\u0000p1')).toBe(timer);
     expect((gateway as any).clearDisconnectTimer('room-1', 'p1')).toBe(true);
-    expect((gateway as any).disconnectTimers.has('p1')).toBe(false);
+    expect((gateway as any).disconnectTimers.has('room-1\u0000p1')).toBe(false);
+  });
+
+  it('keeps the old room leave when a new connection with the same playerId joins another room', async () => {
+    const { gateway, roomService } = makeGateway();
+    const oldSocket = makeSocket('old-socket', {
+      identityType: 'guest', sessionId: 'guest-1', nickname: 'Player',
+      playerId: 'p1', roomId: 'room-1', roomCode: 'AAA111',
+    });
+    oldSocket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
+    gateway.handleDisconnect(oldSocket);
+    const oldTimer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
+    expect(oldTimer).toBeDefined();
+
+    // A different socket/identity with the same playerId joins another room.
+    roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
+    roomService.joinRoom.mockResolvedValue({ roomId: 'room-2', roomCode: 'BBB222', playerId: 'p1' });
+    const newSocket = makeSocket('new-socket', authedDataFor('guest-2'));
+    await gateway.onRoomJoin(newSocket, { roomCode: 'BBB222' });
+
+    expect((gateway as any).roomSockets.get('room-2').get('p1')).toBe(newSocket);
+    expect(newSocket.data.roomId).toBe('room-2');
+    expect((gateway as any).disconnectTimers.get('room-2\u0000p1')).toBeUndefined();
+    expect((gateway as any).disconnectTimers.get('room-1\u0000p1')).toBe(oldTimer);
+
+    await jest.advanceTimersByTimeAsync(15_000);
+    expect(roomService.leaveRoom).toHaveBeenCalledWith('room-1', 'p1');
+    expect(roomService.leaveRoom).not.toHaveBeenCalledWith('room-2', 'p1');
   });
 
   it('does not cancel a newer replacement timer when a slow kick ban completes', async () => {
@@ -179,7 +212,7 @@ describe('GameSocketGateway kick and disconnect timers', () => {
 
     // The kicked socket disconnects, so it owns a grace timer.
     gateway.handleDisconnect(originalTarget);
-    const kickedTimer = (gateway as any).disconnectTimers.get('p1');
+    const kickedTimer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
     expect(kickedTimer).toBeDefined();
 
     // A replacement reconnects during banPlayer and installs its own timer.
@@ -194,13 +227,13 @@ describe('GameSocketGateway kick and disconnect timers', () => {
     // a timer owned by the replacement socket.
     expect((gateway as any).clearDisconnectTimer('room-1', 'p1', originalTarget.id, 1)).toBe(true);
     const replacementTimer = { timer: setTimeout(() => {}), roomId: 'room-1', playerId: 'p1', socketId: replacement.id, generation: 2 };
-    (gateway as any).disconnectTimers.set('p1', replacementTimer);
+    (gateway as any).disconnectTimers.set('room-1\u0000p1', replacementTimer);
 
     resolveBan({ userId: null, guestSessionId: 'guest-1' });
     await kickPromise;
 
     // The slow kick must leave the newer socket's timer and membership alone.
-    expect((gateway as any).disconnectTimers.get('p1')).toBe(replacementTimer);
+    expect((gateway as any).disconnectTimers.get('room-1\u0000p1')).toBe(replacementTimer);
     expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(replacement);
   });
 });
@@ -315,7 +348,7 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
     (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
     (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
     gateway.handleDisconnect(oldSocket);
-    const oldTimer = (gateway as any).disconnectTimers.get('p1');
+    const oldTimer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
     expect(oldTimer).toBeDefined();
     expect((gateway as any).roomSockets.has('room-1')).toBe(false);
 
@@ -332,7 +365,7 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
     resolveJoin({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
     await joinPromise;
 
-    expect((gateway as any).disconnectTimers.has('p1')).toBe(false);
+    expect((gateway as any).disconnectTimers.has('room-1\u0000p1')).toBe(false);
     expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
     expect(roomService.leaveRoom).not.toHaveBeenCalled();
     expect(newSocket.emit).toHaveBeenCalledWith('room:snapshot', expect.objectContaining({ yourPlayerId: 'p1' }));
@@ -796,7 +829,7 @@ describe('GameSocketGateway join race conditions', () => {
 
     // Old socket disconnects, starting a grace timer.
     gateway.handleDisconnect(oldSocket);
-    const timer = (gateway as any).disconnectTimers.get('p1');
+    const timer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
     expect(timer).toBeDefined();
 
     // New socket starts a join while the timer is pending.
@@ -842,7 +875,7 @@ describe('GameSocketGateway join race conditions', () => {
     (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
     (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
     gateway.handleDisconnect(oldSocket);
-    const staleTimer = (gateway as any).disconnectTimers.get('p1');
+    const staleTimer = (gateway as any).disconnectTimers.get('room-1\u0000p1');
     expect(staleTimer).toBeDefined();
 
     // The winner joins before the grace timer fires: its membership generation
@@ -869,7 +902,7 @@ describe('GameSocketGateway join race conditions', () => {
     (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
     (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
     gateway.handleDisconnect(oldSocket);
-    expect((gateway as any).disconnectTimers.get('p1')).toBeDefined();
+    expect((gateway as any).disconnectTimers.get('room-1\u0000p1')).toBeDefined();
 
     // Start the new join while the stale timer is still pending.
     const newSocket = makeSocket('new-socket', authedData('guest-1'));
@@ -896,7 +929,53 @@ describe('GameSocketGateway join race conditions', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(roomService.joinRoom).toHaveBeenCalledWith('ABC123', 'Player', 'guest-1', null);
+    expect(roomService.joinRoom).toHaveBeenCalledWith('ABC123', 'Player', 'guest-1', null, undefined);
+    expect(roomService.leaveRoom).toHaveBeenCalledTimes(1);
+    expect(game.removePlayer).not.toHaveBeenCalled();
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
+  });
+
+  it('reactivates the winner DB row in a password-protected room after a stale leave', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const oldSocket = makeSocket('old-socket', {
+      ...authedData('guest-1'), playerId: 'p1', roomId: 'room-1', roomCode: 'ABC123',
+    });
+    oldSocket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', oldSocket]]));
+    (gateway as any).activeMemberships.set('room-1\u0000p1', { generation: 1, socketId: oldSocket.id });
+    gateway.handleDisconnect(oldSocket);
+
+    const newSocket = makeSocket('new-socket', authedData('guest-1'));
+    let resolveLeave!: (value: undefined) => void;
+    roomService.leaveRoom.mockImplementationOnce(() => new Promise<undefined>(resolve => { resolveLeave = resolve; }));
+    let resolveJoin!: (value: { roomId: string; roomCode: string; playerId: string }) => void;
+    let joinRequested!: () => void;
+    const joinSeen = new Promise<void>(resolve => { joinRequested = resolve; });
+    const roomPassword = 'secret-password';
+    roomService.joinRoom.mockImplementation((code: string, _nickname: string, _guest: string | null, _user: string | null, password?: string) => {
+      joinRequested();
+      // RoomService enforces this check in the real service: a protected room
+      // cannot be rejoined without the password the winner actually supplied.
+      if (password !== roomPassword) throw new Error('Invalid password');
+      return new Promise(resolve => { resolveJoin = resolve; });
+    });
+
+    const joinPromise = gateway.onRoomJoin(newSocket, { roomCode: 'ABC123', password: roomPassword });
+    await joinSeen;
+    await jest.advanceTimersByTimeAsync(15_000);
+    resolveJoin({ roomId: 'room-1', roomCode: 'ABC123', playerId: 'p1' });
+    await joinPromise;
+
+    resolveLeave(undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Compensation must actually rejoin with the verified password. A null
+    // password would throw here and leave the winner row soft-deleted.
+    expect(roomService.joinRoom).toHaveBeenLastCalledWith(
+      'ABC123', 'Player', 'guest-1', null, roomPassword,
+    );
     expect(roomService.leaveRoom).toHaveBeenCalledTimes(1);
     expect(game.removePlayer).not.toHaveBeenCalled();
     expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
