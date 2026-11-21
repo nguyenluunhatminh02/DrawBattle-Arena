@@ -5,10 +5,17 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 @Injectable()
 export class LeaderboardService implements OnModuleInit {
   private readonly logger = new Logger(LeaderboardService.name);
+  /**
+   * Late-bound delegate so the cleanup hook can trigger a refresh without
+   * importing a cycle through the Nest module graph. The live instance
+   * registers itself on init.
+   */
+  private static refreshDelegate: (() => Promise<void>) | null = null;
 
   constructor(private prisma: PrismaService) {}
 
   async onModuleInit() {
+    LeaderboardService.refreshDelegate = () => this.updateLeaderboards();
     try {
       await this.updateLeaderboards();
     } catch (err) {
@@ -17,6 +24,19 @@ export class LeaderboardService implements OnModuleInit {
         err instanceof Error ? err.message : String(err),
       );
     }
+  }
+
+  /**
+   * Public invalidation hook: rebuild all periods after a match finishes.
+   * Hourly cron remains the safety net if this hook cannot run.
+   */
+  async refreshAfterMatch(): Promise<void> {
+    await this.updateLeaderboards();
+  }
+
+  /** Returns the registered instance's refresh callback, if initialised. */
+  static getRefreshDelegate(): (() => Promise<void>) | null {
+    return LeaderboardService.refreshDelegate;
   }
 
   @Cron(CronExpression.EVERY_HOUR)
