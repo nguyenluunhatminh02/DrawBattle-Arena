@@ -3,11 +3,27 @@ import { RenderJobRecord } from './replay-jobs';
 
 // @nestjs/schedule v12 ships ESM-only decorators that Jest (CJS) cannot load;
 // the cron registration itself is not what these tests exercise.
-jest.mock('@nestjs/schedule', () => ({
-  Cron: () => () => undefined,
-  CronExpression: { EVERY_MINUTE: '* * * * *' },
+// Jest hoists jest.mock factories above const declarations, so the recorder
+// is initialised inside the factory rather than at module scope.
+jest.mock('@nestjs/schedule', () => {
+  const registrations: string[] = [];
+  (globalThis as any).__cronRegistrations = registrations;
+  return {
+    Cron: (expression: string) => () => {
+      registrations.push(expression);
+      return undefined;
+    },
+    CronExpression: {
+      EVERY_MINUTE: '* * * * *',
+      EVERY_DAY_AT_3AM: '0 3 * * *',
+    },
+  };
+});
+jest.mock('worker_threads', () => ({
+  Worker: jest.fn(),
+  parentPort: null,
+  workerData: undefined,
 }));
-jest.mock('worker_threads', () => ({ Worker: jest.fn() }));
 
 const now = new Date('2026-11-20T12:00:00.000Z');
 const job = (overrides: Partial<RenderJobRecord> = {}): RenderJobRecord => ({
@@ -104,6 +120,36 @@ describe('ReplayWorker', () => {
     await expect(
       (worker as any).renderInWorker('job-1', 'replay-1', [], 1000),
     ).rejects.toThrow(/shut down/);
+  });
+
+  it('registers a daily cleanup cron in addition to the minute crons', () => {
+    // Decorators execute at class definition time; the mock records them.
+    const crons = jest.requireMock('@nestjs/schedule').CronExpression as Record<string, string>;
+    expect(crons.EVERY_DAY_AT_3AM).toBe('0 3 * * *');
+    expect((globalThis as any).__cronRegistrations).toContain('0 3 * * *');
+  });
+
+  it('caps scheduled cleanup batches and reuses the 30-day default', async () => {
+    jest.useFakeTimers().setSystemTime(now);
+    try {
+      const { worker, prisma } = makeWorker();
+      expect(await worker.scheduledCleanupOldReplays()).toEqual({ deleted: 0 });
+      expect(prisma.replay.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { createdAt: { lt: new Date('2026-10-21T12:00:00.000Z') }, gifUrl: { not: null } },
+          take: 100,
+        }),
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('swallows scheduled cleanup failures so the cron tick does not reject', async () => {
+    const { worker, prisma } = makeWorker();
+    prisma.replay.findMany.mockRejectedValueOnce(new Error('db down'));
+
+    await expect(worker.scheduledCleanupOldReplays()).resolves.toEqual({ deleted: 0 });
   });
 
   it('clears gifUrl after unlinking and refuses unsafe paths', async () => {

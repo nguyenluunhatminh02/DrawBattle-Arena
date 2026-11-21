@@ -9,6 +9,8 @@ import { RenderJobRecord, ReplayJobService } from './replay-jobs';
 
 const RENDER_TIMEOUT_MS = 60_000;
 const RECONCILE_BATCH_SIZE = 100;
+const CLEANUP_BATCH_SIZE = 100;
+const DEFAULT_CLEANUP_MAX_AGE_DAYS = 30;
 const REPLAY_URL_PREFIX = '/replays/';
 const SHUTDOWN_ERROR = 'Replay worker shut down during render';
 
@@ -271,13 +273,31 @@ export class ReplayWorker implements OnModuleDestroy {
     });
   }
 
-  async cleanupOldReplays(maxAgeDays = 30) {
+  /** Daily sweep of expired GIF pointers; the batch cap keeps cron ticks bounded. */
+  @Cron(CronExpression.EVERY_DAY_AT_3AM)
+  async scheduledCleanupOldReplays() {
+    if (this.shuttingDown) return { deleted: 0 };
+    try {
+      return await this.cleanupOldReplays();
+    } catch (err) {
+      this.logger.error(
+        'Scheduled replay cleanup failed',
+        err instanceof Error ? err.message : String(err),
+      );
+      return { deleted: 0 };
+    }
+  }
+
+  async cleanupOldReplays(maxAgeDays = DEFAULT_CLEANUP_MAX_AGE_DAYS) {
+    const age = Math.max(0, Math.floor(maxAgeDays) || DEFAULT_CLEANUP_MAX_AGE_DAYS);
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - maxAgeDays);
+    cutoff.setDate(cutoff.getDate() - age);
 
     const old = await this.prisma.replay.findMany({
       where: { createdAt: { lt: cutoff }, gifUrl: { not: null } },
       select: { id: true, gifUrl: true },
+      orderBy: { createdAt: 'asc' },
+      take: CLEANUP_BATCH_SIZE,
     });
 
     let deleted = 0;

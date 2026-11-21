@@ -29,8 +29,35 @@ interface RenderJob {
 const MAX_FRAMES = 120;
 const MAX_FPS = 10;
 const MAX_DURATION_MS = 60_000;
+const MAX_TOTAL_POINTS = 120_000;
 
-function renderSync(job: RenderJob): Buffer {
+/**
+ * Keep at most maxPoints across all strokes, thinning each stroke evenly so
+ * the drawing still resembles the original replay. Skips empty strokes.
+ */
+function capStrokes(strokes: Stroke[], maxPoints: number): Stroke[] {
+  const total = strokes.reduce((sum, s) => sum + s.points.length, 0);
+  if (total <= maxPoints) return strokes;
+
+  const scale = maxPoints / total;
+  const capped: Stroke[] = [];
+  let remaining = maxPoints;
+  for (const stroke of strokes) {
+    if (remaining <= 0) break;
+    if (stroke.points.length === 0) continue;
+    const keep = Math.max(
+      1,
+      Math.min(stroke.points.length, Math.round(stroke.points.length * scale), remaining),
+    );
+    const step = stroke.points.length / keep;
+    const points = Array.from({ length: keep }, (_, i) => stroke.points[Math.floor(i * step)]);
+    capped.push({ ...stroke, points });
+    remaining -= keep;
+  }
+  return capped;
+}
+
+export function renderSync(job: RenderJob): Buffer {
   if (!createCanvas) {
     throw new Error('canvas module not available');
   }
@@ -53,7 +80,16 @@ function renderSync(job: RenderJob): Buffer {
   encoder.setQuality(10);
   encoder.start();
 
-  const totalPoints = strokes.reduce((sum, s) => sum + s.points.length, 0);
+  // Downsample huge replays once so the render loop has a hard bound on the
+  // number of points it can visit. Without this, frames * totalPoints work
+  // can time out the worker on a malicious/accidental drawing.
+  const drawStrokes = capStrokes(strokes, MAX_TOTAL_POINTS);
+  const cumulativePointCounts: number[] = [];
+  let totalPoints = 0;
+  for (const stroke of drawStrokes) {
+    totalPoints += stroke.points.length;
+    cumulativePointCounts.push(totalPoints);
+  }
 
   for (let frame = 0; frame < totalFrames; frame++) {
     ctx.fillStyle = backgroundColor;
@@ -63,7 +99,7 @@ function renderSync(job: RenderJob): Buffer {
       totalPoints,
       Math.ceil(((frame + 1) / totalFrames) * totalPoints),
     );
-    drawStrokesUpTo(ctx, strokes, target, width, height);
+    drawStrokesUpTo(ctx, drawStrokes, cumulativePointCounts, target, width, height);
     encoder.addFrame(ctx);
   }
 
@@ -74,16 +110,21 @@ function renderSync(job: RenderJob): Buffer {
 function drawStrokesUpTo(
   ctx: any,
   strokes: Stroke[],
+  cumulativePointCounts: number[],
   maxPoints: number,
   canvasWidth: number,
   canvasHeight: number,
 ) {
   let pointsDrawn = 0;
 
-  for (const stroke of strokes) {
+  for (let strokeIndex = 0; strokeIndex < strokes.length; strokeIndex++) {
+    const stroke = strokes[strokeIndex];
     if (pointsDrawn >= maxPoints) break;
     if (stroke.points.length === 0) continue;
 
+    // Precomputed cumulative counts let the loop skip strokes that cannot
+    // contribute to this frame in O(1), instead of summing lengths per frame.
+    if (cumulativePointCounts[strokeIndex] <= pointsDrawn) continue;
     const remaining = maxPoints - pointsDrawn;
     const pointsToDraw = Math.min(stroke.points.length, remaining);
 
@@ -115,10 +156,11 @@ function drawStrokesUpTo(
   }
 }
 
-const job = workerData as RenderJob;
-try {
-  const buf = renderSync(job);
-  parentPort!.postMessage(buf);
-} catch (err) {
-  parentPort!.postMessage({ error: err instanceof Error ? err.message : String(err) });
+if (parentPort && workerData) {
+  try {
+    const buf = renderSync(workerData as RenderJob);
+    parentPort.postMessage(buf);
+  } catch (err) {
+    parentPort.postMessage({ error: err instanceof Error ? err.message : String(err) });
+  }
 }
