@@ -51,7 +51,7 @@ These are open architecture/operations gaps, not covered by the regression suite
 - **Multi-instance**: Redis adapter broadcasts Socket.IO events only; authoritative game state (timers, turns, scores, strokes) is in-memory per API process. A room is pinned to one instance via a Redis ownership key; there is no state handoff or cross-node recovery.
 - **Crash recovery**: An in-progress match is lost when its API process restarts; only finished matches are persisted.
 - **Dependency security**: The app now uses Next.js 15.5.29 and the current `pnpm audit --prod` baseline is **3 advisories** (1 high, 2 moderate); re-audit dependencies before any public deployment (see [docs/failure-scenarios.md](./docs/failure-scenarios.md#15-production-dependency-advisories-after-p1-04)).
-- **Leaderboard**: All-time view is capped at the 2000 most recent matches; rankings are approximate.
+- **Leaderboard**: All-time view ranks across all finished matches; daily and weekly snapshots remain capped at the 2000 most recent matches in their window to bound the hourly job.
 - **Rate limiting**: Shared fixed-window buckets in Redis when `REDIS_URL` is reachable, with a process-local fallback during Redis outages. Authenticated identity keys and `TRUST_PROXY` mitigate spoofing but the fallback is not distributed and resets on restart.
 - **Persistence/retention**: Drawings (strokes) and guesses are stored with finished matches and replay rows; there is no automated retention/privacy deletion job yet.
 - **Replay rendering**: GIF render jobs and funnel events are persisted in PostgreSQL (`render_jobs`, `funnel_events`) by migration `20261123`, with retry counters and stale-lease recovery after a restart. Rendering itself is capped at 3 concurrent jobs per API process and GIF files still live on the API container filesystem.
@@ -157,6 +157,35 @@ JWT_SECRET=$(openssl rand -hex 32) docker compose up --build
 - PostgreSQL and Redis host ports bind to `127.0.0.1` by default; only publish them on a trusted network (e.g. `0.0.0.0:5440:5432`) because they ship with default/no credentials
 - Compose health checks probe all four services (`/api/flags` for API, `/` for web); the API/web checks are liveness only, not `/health`
 - The API container runs `prisma migrate deploy`, seeds the catalogue only if the `words` table is empty, then starts the server
+
+### API URL configuration (P1-04)
+
+Production builds **never** default the browser API URL to `http://localhost:3001`.
+
+By default `NEXT_PUBLIC_API_URL` is empty. The browser then uses **same-origin**
+URLs: REST calls go to `/api/*`, Socket.IO connects to `/game`, and Next.js
+rewrites proxy those paths (plus `/avatars/*` and `/replays/*`) to the internal
+API target. This is the recommended setup because it needs no CORS/WSS
+configuration on the public edge and works for both local Compose and a
+single-origin reverse-proxy deployment (e.g. nginx → web:3002).
+
+- `INTERNAL_API_URL` — server-side proxy target; defaults to `http://api:3001`
+  inside Compose. Override it for local dev / CI, e.g. `INTERNAL_API_URL=http://localhost:3001`.
+- `NEXT_PUBLIC_API_URL` — optional **public** origin for the browser (e.g.
+  `https://api.example.com`). Set it only when the API is served from a
+  different public origin than the web app. It must be an absolute `http(s)`
+  URL; an invalid value fails the build. When set, the API must allow the web
+  origin in `CORS_ORIGIN` and proxy WebSocket upgrades for `/game`.
+
+To verify a build has no leaked localhost URL:
+
+```bash
+cd apps/web && unset NEXT_PUBLIC_API_URL && pnpm build
+pnpm --filter @drawbattle/web test:e2e -- --grep 'P1-04'
+```
+
+The e2e spec `apps/web/e2e/build-config.spec.ts` scans `.next/static/**/*.js`
+and fails if `localhost:3001` is present in any browser bundle.
 
 ## Architecture decisions
 

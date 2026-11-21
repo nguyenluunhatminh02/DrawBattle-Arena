@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Server-side fetch uses the internal proxy target (INTERNAL_API_URL), never
+// the browser-facing URL. The default works inside Compose (http://api:3001).
+const API_URL: string = process.env.INTERNAL_API_URL?.trim() || 'http://api:3001';
 
 interface ChallengeMeta {
   challengeId: string;

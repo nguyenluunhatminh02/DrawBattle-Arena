@@ -13,7 +13,10 @@ COPY --from=deps /app ./
 COPY tsconfig.json ./
 COPY packages ./packages
 COPY apps/web ./apps/web
-ARG NEXT_PUBLIC_API_URL
+# Leave NEXT_PUBLIC_API_URL empty by default: the browser uses same-origin
+# /api/* and /game/* paths, proxied to INTERNAL_API_URL by Next.js rewrites.
+# Override at build time only when the API has a different public origin.
+ARG NEXT_PUBLIC_API_URL=""
 ARG INTERNAL_API_URL=http://api:3001
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV INTERNAL_API_URL=$INTERNAL_API_URL

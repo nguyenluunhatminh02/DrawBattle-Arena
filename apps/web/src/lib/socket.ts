@@ -18,13 +18,12 @@ export function connectSocket(token: string): Socket<ServerToClientEvents, Clien
     currentToken = null;
   }
 
-  const apiUrl =
-    process.env.NEXT_PUBLIC_API_URL ||
-    (typeof window !== 'undefined' &&
-    window.location.hostname !== 'localhost' &&
-    window.location.hostname !== '127.0.0.1'
-      ? window.location.origin
-      : 'http://localhost:3001');
+  // NEXT_PUBLIC_API_URL is inlined at build time. When unset (the default) it
+  // is empty and we use same-origin: the browser connects to the current
+  // origin, and Next.js rewrites proxy /game to the API via INTERNAL_API_URL.
+  // No localhost fallback is embedded in the browser bundle (P1-04).
+  const explicitUrl = process.env.NEXT_PUBLIC_API_URL?.trim() || '';
+  const apiUrl = explicitUrl || (typeof window !== 'undefined' ? window.location.origin : '');
   socket = io(`${apiUrl}/game`, {
     auth: { token },
     transports: ['websocket', 'polling'],

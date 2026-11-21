@@ -32,7 +32,7 @@ Actors and entry points:
 | `postgres` | postgres:16-alpine | host 5440 → 5432 | named volume `pgdata`; health checked with `pg_isready`. |
 | `redis` | redis:7-alpine | host 6390 → 6379 | named volume `redisdata`; health checked with `redis-cli ping`. |
 | `api` | `apps/api/Dockerfile` | 3001 | `NODE_ENV=production`, `TRUST_PROXY` defaults to `0` (must be set to the trusted hop count behind a proxy), `JWT_SECRET` required at boot. |
-| `web` | `apps/web/Dockerfile` | 3002 | `NEXT_PUBLIC_API_URL` (browser) and `INTERNAL_API_URL` (server-side) build args. |
+| `web` | `apps/web/Dockerfile` | 3002 | `NEXT_PUBLIC_API_URL` (optional browser override, empty by default → same-origin) and `INTERNAL_API_URL` (server-side rewrite target, defaults to `http://api:3001`). |
 
 There is **one API container in the shipped compose file**. The code contains partial multi-instance support (Redis adapter, room leases) but no load balancer, no shared media volume strategy beyond the single `media_data` mount, and no composition for scaling `api` horizontally. See [ADR-004](./adr/004-room-ownership-lease-vs-single-instance.md).
 
