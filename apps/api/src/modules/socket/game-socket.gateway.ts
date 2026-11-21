@@ -183,8 +183,8 @@ export class GameSocketGateway
     const playerId = socket.data.playerId;
     if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
 
-    this.clearDisconnectTimer(roomId, playerId, socket.id);
-
+    // Persist the departure before releasing in-memory state so a rejected
+    // write aborts the switch and leaves the old membership intact.
     try {
       await this.roomService.leaveRoom(roomId, playerId);
     } catch (err) {
@@ -192,8 +192,10 @@ export class GameSocketGateway
         'Failed to mark player left on room switch',
         err instanceof Error ? err.message : String(err),
       );
+      throw err;
     }
 
+    this.clearDisconnectTimer(roomId, playerId, socket.id);
     this.game.removePlayer(roomId, playerId);
     const roomMap = this.roomSockets.get(roomId);
     roomMap?.delete(playerId);
@@ -335,6 +337,22 @@ export class GameSocketGateway
         return;
       }
 
+      // A socket may belong to at most one game room. Persist the old leave
+      // before writing the destination row so a rejected leave aborts the
+      // switch without touching the destination or old socket state.
+      if (socket.data.roomId && socket.data.roomId !== room.id) {
+        try {
+          await this.leaveCurrentRoom(socket);
+        } catch (err) {
+          this.logger.error(
+            'Room switch aborted: could not leave previous room',
+            err instanceof Error ? err.message : String(err),
+          );
+          socket.emit('error', 'SWITCH_FAILED', 'Could not leave the previous room');
+          return;
+        }
+      }
+
       const joined = await this.roomService.joinRoom(
         roomCode,
         nickname,
@@ -342,13 +360,6 @@ export class GameSocketGateway
         socket.data.identityType === 'user' ? socket.data.userId! : null,
         typeof data.password === 'string' ? data.password : undefined,
       );
-
-      // A socket may belong to at most one game room. If it is switching
-      // rooms, fully release the old membership (DB row + in-memory slot)
-      // before installing the new one.
-      if (socket.data.roomId && socket.data.roomId !== joined.roomId) {
-        await this.leaveCurrentRoom(socket);
-      }
 
       // When the same identity reconnects with a new socket, revoke the old
       // socket rather than leaving two sockets able to act for one player.
@@ -490,7 +501,15 @@ export class GameSocketGateway
 
   @SubscribeMessage('room:leave')
   async onRoomLeave(@ConnectedSocket() socket: AuthedSocket) {
-    await this.leaveCurrentRoom(socket);
+    try {
+      await this.leaveCurrentRoom(socket);
+    } catch (err) {
+      this.logger.error(
+        'Failed to leave room',
+        err instanceof Error ? err.message : String(err),
+      );
+      socket.emit('error', 'LEAVE_FAILED', 'Could not leave the room');
+    }
   }
 
   @SubscribeMessage('room:ready')
@@ -498,9 +517,15 @@ export class GameSocketGateway
     @ConnectedSocket() socket: AuthedSocket,
     @MessageBody() ready: boolean,
   ) {
-    if (!socket.data.roomId || !socket.data.playerId) return;
-    this.game.setReady(socket.data.roomId, socket.data.playerId, ready);
-    this.broadcastRoomUpdate(socket.data.roomId);
+    const roomId = socket.data.roomId;
+    const playerId = socket.data.playerId;
+    if (!roomId || !playerId || !this.isActiveMember(socket, roomId, playerId)) return;
+    if (typeof ready !== 'boolean') {
+      socket.emit('error', 'INVALID_PAYLOAD', 'Invalid ready state');
+      return;
+    }
+    this.game.setReady(roomId, playerId, ready);
+    this.broadcastRoomUpdate(roomId);
   }
 
   @SubscribeMessage('match:start')

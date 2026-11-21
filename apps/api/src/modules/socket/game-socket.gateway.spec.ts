@@ -52,6 +52,7 @@ function makeGateway() {
     initRoom: jest.fn(),
     registerSink: jest.fn(),
     addPlayer: jest.fn().mockReturnValue({ isHost: false, isReady: false, isOnline: true, score: 0 }),
+    joinRoom: jest.fn(),
     removePlayer: jest.fn(),
     setReady: jest.fn(),
     isHost: jest.fn().mockImplementation((_room, player) => player === 'host'),
@@ -203,6 +204,36 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
     expect(socket.data.playerId).toBe('p2');
   });
 
+  it('aborts a room switch when the old room leave cannot be persisted', async () => {
+    const { gateway, roomService, game } = makeGateway();
+    const socket = makeSocket('s1', authedData('guest-1'));
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', socket]]));
+    socket.data.playerId = 'p1';
+    socket.data.roomId = 'room-1';
+    socket.data.roomCode = 'AAA111';
+    socket.join('room-1');
+
+    roomService.getRoomInfo.mockResolvedValue({ id: 'room-2', code: 'BBB222' });
+    roomService.leaveRoom.mockImplementation(async (roomId: string) => {
+      if (roomId === 'room-1') throw new Error('db down');
+    });
+
+    await gateway.onRoomJoin(socket, { roomCode: 'BBB222' });
+
+    // Old membership and socket state remain intact.
+    expect(game.removePlayer).not.toHaveBeenCalled();
+    expect(socket.rooms.has('room-1')).toBe(true);
+    expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(socket);
+    expect(socket.data.roomId).toBe('room-1');
+    expect(socket.data.playerId).toBe('p1');
+
+    // Destination is never written or installed.
+    expect(roomService.joinRoom).not.toHaveBeenCalled();
+    expect(game.addPlayer).not.toHaveBeenCalledWith('room-2', 'p2', expect.anything());
+    expect(socket.rooms.has('room-2')).toBe(false);
+    expect(socket.emit).toHaveBeenCalledWith('error', 'SWITCH_FAILED', 'Could not leave the previous room');
+  });
+
   it('revokes the old socket and blocks its actions after a new socket replaces it', async () => {
     const { gateway, game } = makeGateway();
     const oldSocket = makeSocket('old-socket', {
@@ -250,6 +281,46 @@ describe('GameSocketGateway single-room membership and socket replacement', () =
     expect((gateway as any).roomSockets.get('room-1').get('p1')).toBe(newSocket);
     expect(game.setPlayerOnline).not.toHaveBeenCalledWith('room-1', 'p1', false);
     expect(roomService.leaveRoom).not.toHaveBeenCalled();
+  });
+});
+
+describe('GameSocketGateway ready state validation', () => {
+  it('ignores ready events from a stale socket that still carries room data', () => {
+    const { gateway, game } = makeGateway();
+    const live = makeSocket('live-socket', { playerId: 'p1', roomId: 'room-1' });
+    const stale = makeSocket('stale-socket', { playerId: 'p1', roomId: 'room-1' });
+    live.join('room-1');
+    stale.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', live]]));
+
+    gateway.onReady(stale, true);
+
+    expect(game.setReady).not.toHaveBeenCalled();
+    expect(stale.emit).not.toHaveBeenCalledWith('error', expect.anything(), expect.anything());
+  });
+
+  it('rejects non-boolean ready payloads without mutating game state', () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeSocket('s1', { playerId: 'p1', roomId: 'room-1' });
+    socket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', socket]]));
+
+    gateway.onReady(socket, 'true' as any);
+
+    expect(game.setReady).not.toHaveBeenCalled();
+    expect(socket.emit).toHaveBeenCalledWith('error', 'INVALID_PAYLOAD', 'Invalid ready state');
+  });
+
+  it('accepts boolean ready payloads from the active member', () => {
+    const { gateway, game } = makeGateway();
+    const socket = makeSocket('s1', { playerId: 'p1', roomId: 'room-1' });
+    socket.join('room-1');
+    (gateway as any).roomSockets.set('room-1', new Map([['p1', socket]]));
+
+    gateway.onReady(socket, true);
+
+    expect(game.setReady).toHaveBeenCalledWith('room-1', 'p1', true);
+    expect(socket.emit).not.toHaveBeenCalledWith('error', expect.anything(), expect.anything());
   });
 });
 
