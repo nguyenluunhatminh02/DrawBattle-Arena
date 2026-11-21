@@ -103,11 +103,31 @@ describe('ThrottleGuard', () => {
   it('enforces an identity bucket independent of the IP bucket', async () => {
     mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'identity-test' });
     // Distinct IPs keep the IP buckets separate, isolating the identity bucket.
-    const ctxA = makeContext('127.0.0.1', { user: { id: 'user-a' } });
-    const ctxB = makeContext('10.0.0.8', { user: { id: 'user-b' } });
+    const ctxA = makeContext('127.0.0.1', { user: { id: 'user-a', type: 'user' } });
+    const ctxB = makeContext('10.0.0.8', { user: { id: 'user-b', type: 'user' } });
     await expect(guard.canActivate(ctxA)).resolves.toBe(true);
     await expect(guard.canActivate(ctxB)).resolves.toBe(true);
     await expect(guard.canActivate(ctxA)).rejects.toThrow();
+  });
+
+  it('ignores a populated principal whose type is not explicitly user', async () => {
+    mockReflector.get.mockReturnValue({ limit: 1, windowMs: 1000, keyPrefix: 'untyped-principal' });
+    const buckets = (guard as any).buckets as Map<string, unknown>;
+
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', { user: { id: 'user-a' } })),
+    ).resolves.toBe(true);
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', { user: { id: 'user-b' } })),
+    ).rejects.toThrow();
+    await expect(
+      guard.canActivate(makeContext('127.0.0.1', { user: { id: 'user-c', type: 'guest' } })),
+    ).rejects.toThrow();
+
+    // Every request consumed only the single IP bucket.
+    expect([...buckets.keys()]).toHaveLength(1);
+    expect([...buckets.keys()][0]).toContain('127.0.0.1');
+    expect([...buckets.keys()][0]).not.toContain('identity');
   });
 
   it('keys buckets by bearer-token identity before route guards populate request.user', async () => {
@@ -224,7 +244,7 @@ describe('ThrottleGuard', () => {
     for (let i = 0; i < 10_020; i++) {
       // A fresh IP per identity keeps the shared IP bucket out of the way.
       const ctx = makeContext(`10.1.${Math.floor(i / 250)}.${(i % 250) + 1}`, {
-        user: { id: `rotating-${i}` },
+        user: { id: `rotating-${i}`, type: 'user' },
       });
       await guard.canActivate(ctx).catch(() => undefined);
     }
@@ -245,10 +265,13 @@ describe('ThrottleGuard', () => {
         if (event === 'ready') readyListeners.push(listener);
       });
       evalMock = jest.fn(async (_script: string, opts: { keys: string[] }) => {
-        const key = opts.keys[0];
-        const count = (counts.get(key) ?? 0) + 1;
-        counts.set(key, count);
-        return [count, 60_000];
+        // Mirror the Lua script: increment every key in one eval and return
+        // counts in the same order as the keys.
+        return opts.keys.map(key => {
+          const count = (counts.get(key) ?? 0) + 1;
+          counts.set(key, count);
+          return count;
+        });
       });
       (createClient as jest.Mock).mockReturnValue({
         on: onMock,
@@ -277,7 +300,7 @@ describe('ThrottleGuard', () => {
       await guardB.onModuleDestroy();
     });
 
-    it('checks independent IP and identity buckets with the same atomic script', async () => {
+    it('increments both keys in one eval and rejects if either count exceeds the limit', async () => {
       mockReflector.get.mockReturnValue({ limit: 1, windowMs: 60_000, keyPrefix: 'redis-dual' });
       const redisGuard = new ThrottleGuard(mockReflector);
       const token = jwt.sign({ sub: 'user-a', type: 'user' }, JWT_SECRET);
@@ -285,17 +308,24 @@ describe('ThrottleGuard', () => {
         makeContext(ip, { headers: { authorization: `Bearer ${token}` } });
 
       await expect(redisGuard.canActivate(forIp('10.2.0.1'))).resolves.toBe(true);
-      expect(evalMock).toHaveBeenCalledTimes(2);
-      expect(evalMock.mock.calls[0][0]).toBe(evalMock.mock.calls[1][0]);
+      // One eval for the whole request, carrying both keys in order.
+      expect(evalMock).toHaveBeenCalledTimes(1);
       expect(evalMock.mock.calls[0][0]).toContain("redis.call('INCR'");
-      const keys: string[] = evalMock.mock.calls.map(call => call[1].keys[0]);
+      expect(evalMock.mock.calls[0][0]).toContain("redis.call('PEXPIRE'");
+      expect(evalMock.mock.calls[0][1].arguments).toEqual(['60000']);
+      const keys: string[] = evalMock.mock.calls[0][1].keys;
       expect(keys).toHaveLength(2);
       expect(keys[0]).toContain(':ip:10.2.0.1');
       expect(keys[1]).toContain('identity:user:user-a');
 
-      // Both buckets are at their limit: rotating the IP still hits identity.
+      // A fresh IP has an unused IP bucket but the identity bucket is exhausted.
       await expect(redisGuard.canActivate(forIp('10.2.0.2'))).rejects.toThrow();
-      expect(evalMock).toHaveBeenCalledTimes(4);
+      expect(evalMock).toHaveBeenCalledTimes(2);
+      expect(evalMock.mock.calls[1][1].keys[1]).toBe(keys[1]);
+
+      // The identity bucket must have consumed the rejected request too.
+      const identityCount = counts.get(keys[1]);
+      expect(identityCount).toBe(2);
       await redisGuard.onModuleDestroy();
     });
 
@@ -324,6 +354,61 @@ describe('ThrottleGuard', () => {
         await expect(redisGuard.canActivate(ctx)).rejects.toThrow();
         expect(evalMock).toHaveBeenCalledTimes(3);
         await redisGuard.onModuleDestroy();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('extends the cooldown on every failure and does not clear it on a late success', async () => {
+      jest.useFakeTimers();
+      try {
+        mockReflector.get.mockReturnValue({ limit: 10, windowMs: 60_000, keyPrefix: 'cooldown' });
+        const redisGuard = new ThrottleGuard(mockReflector);
+        const ctx = makeContext('10.9.9.20');
+
+        evalMock.mockRejectedValueOnce(new Error('redis down'));
+        await expect(redisGuard.canActivate(ctx)).resolves.toBe(true);
+        const firstDeadline = (redisGuard as any).redisRetryAfter as number;
+        expect(firstDeadline).toBe(Date.now() + 30_000);
+
+        // Advance less than the full cooldown and exercise another failure via
+        // a fresh guard sharing the same client. The deadline must move forward
+        // rather than stay pinned to the first failure.
+        jest.setSystemTime(Date.now() + 10_000);
+        const secondGuard = new ThrottleGuard(mockReflector);
+        evalMock.mockRejectedValueOnce(new Error('still down'));
+        await expect(secondGuard.canActivate(ctx)).resolves.toBe(true);
+        expect((secondGuard as any).redisRetryAfter).toBe(Date.now() + 30_000);
+        expect((secondGuard as any).redisRetryAfter).toBeGreaterThan(firstDeadline);
+        expect((redisGuard as any).redisRetryAfter).toBe(firstDeadline);
+
+        // A success that arrives while a cooldown is still active must not
+        // clear it. Start a deferred eval on the second guard (still inside its
+        // extended cooldown), then resolve it before the deadline elapses.
+        // The public canActivate path correctly skips Redis during cooldown, so
+        // drive checkRedis directly for this race.
+        const beforeSuccess = (secondGuard as any).redisRetryAfter as number;
+        let resolveEval: (value: number[]) => void = () => undefined;
+        evalMock.mockImplementationOnce(
+          () => new Promise<number[]>(resolve => { resolveEval = resolve; }),
+        );
+        const pending = (secondGuard as any).checkRedis(
+          ['cooldown:ip:10.9.9.20'], 60_000, 10,
+        ) as Promise<boolean>;
+        resolveEval([1]);
+        await expect(pending).resolves.toBe(true);
+        expect(evalMock).toHaveBeenCalledTimes(3);
+        expect((secondGuard as any).redisRetryAfter).toBe(beforeSuccess);
+        await expect(secondGuard.canActivate(ctx)).resolves.toBe(true);
+        expect(evalMock).toHaveBeenCalledTimes(3);
+
+        // Once the deadline passes, Redis resumes and a success clears the flag.
+        jest.setSystemTime(beforeSuccess);
+        await expect(secondGuard.canActivate(ctx)).resolves.toBe(true);
+        expect(evalMock).toHaveBeenCalledTimes(4);
+        expect((secondGuard as any).redisRetryAfter).toBe(0);
+        await redisGuard.onModuleDestroy();
+        await secondGuard.onModuleDestroy();
       } finally {
         jest.useRealTimers();
       }

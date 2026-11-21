@@ -26,28 +26,32 @@ const REDIS_KEY_PREFIX = 'drawbattle:throttle:';
 /** Silent fallback when Redis is unavailable must not swallow all abuse. */
 const REDIS_FAILURE_LOG_INTERVAL_MS = 60_000;
 /**
- * After a Redis command fails, keep using local buckets only for this long.
- * A permanent latch would leave every later request on the weaker per-process
- * fallback even after Redis recovers.
+ * After a Redis command fails, keep using local per-process buckets for this
+ * long. Every failure extends the deadline; only the client's `ready` event or
+ * expiry of the cooldown may resume shared buckets.
  */
 const REDIS_RETRY_MS = 30_000;
 
 /**
- * Atomic fixed-window counter. Returns [count, ttlMs]; INCR and EXPIRE are
- * applied in one round trip so concurrent API instances share one bucket and
- * a failed EXPIRE can never leave a key without a TTL.
+ * Atomic fixed-window counters for every required bucket. All KEYS are
+ * incremented in one eval so IP and identity accounting cannot be split by a
+ * concurrent request. The window from ARGV[1] is applied with PEXPIRE to each
+ * key when its window starts (or its TTL is missing), and counts are returned
+ * in the same order as KEYS.
  */
 const THROTTLE_SCRIPT = `
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+local counts = {}
+for i, key in ipairs(KEYS) do
+  local current = redis.call('INCR', key)
+  if current == 1 then
+    redis.call('PEXPIRE', key, ARGV[1])
+  end
+  if redis.call('PTTL', key) < 0 then
+    redis.call('PEXPIRE', key, ARGV[1])
+  end
+  counts[i] = current
 end
-local ttl = redis.call('PTTL', KEYS[1])
-if ttl < 0 then
-  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-  ttl = ARGV[1]
-end
-return { current, ttl }
+return counts
 `;
 
 export const THROTTLE_KEY = 'throttle_config';
@@ -75,9 +79,11 @@ type Bucket = { count: number; resetAt: number };
  *
  * Guest tokens are deliberately ignored: anyone can mint as many as they like
  * and rotating their `sub` must not split an IP's bucket. For the same reason
- * only the signed `type === 'user'` sub is accepted, so a caller cannot choose
- * an arbitrary bucket key. Database validity checks (deleted users) remain in
- * the auth guards; a stale user token can at worst exhaust its own bucket.
+ * only an explicit `type === 'user'` principal or signed token is accepted, so
+ * a caller cannot choose an arbitrary bucket key (a populated principal with
+ * an unknown/missing type is never trusted). Database validity checks (deleted
+ * users) remain in the auth guards; a stale user token can at worst exhaust
+ * its own bucket.
  */
 function userIdentity(request: {
   headers?: Record<string, unknown>;
@@ -85,8 +91,8 @@ function userIdentity(request: {
 }): string | null {
   const populated = request.user;
   if (
-    (populated?.type === undefined || populated.type === 'user') &&
-    typeof populated?.id === 'string' &&
+    populated?.type === 'user' &&
+    typeof populated.id === 'string' &&
     populated.id
   ) {
     return `identity:user:${populated.id}`;
@@ -117,10 +123,13 @@ function userIdentity(request: {
  * also consume a separate identity bucket, so rotating IPs cannot raise their
  * per-identity limit and rotating identities cannot raise an IP's limit. The
  * stricter bound wins: if either bucket is over, the request is rejected.
- * Uses shared Redis fixed-window buckets when REDIS_URL is configured and the
- * client is connected; otherwise it falls back to process-local buckets. After
- * a Redis error it retries on a cooldown (or as soon as Redis reports ready
- * again), and logs at most once a minute. Redis failures never fail open.
+ * Uses one shared Redis eval for all buckets when REDIS_URL is configured and
+ * the client is connected; otherwise it falls back to process-local buckets.
+ * During a Redis outage, fallback limits are per-process: each API instance
+ * gets its own allowance, so the effective fleet-wide limit is multiplied by
+ * the instance count. That weakening is accepted and documented; retries are
+ * gated by a cooldown extended on every failure (or resumed as soon as Redis
+ * reports ready), and failures are logged at most once a minute.
  */
 @Injectable()
 export class ThrottleGuard implements CanActivate, OnModuleDestroy {
@@ -160,16 +169,13 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     const limit = config.limit * mult;
 
     const useRedis = Boolean(this.redis && Date.now() >= this.redisRetryAfter);
-    let allowed = true;
-    // Check every required bucket even after a rejection: each request must
-    // consume one token from each bucket, otherwise a rejected request could
-    // leave one bucket under-counted and let a later request slip through.
-    for (const key of keys) {
-      const bucketAllowed = useRedis
-        ? await this.checkRedis(key, config.windowMs, limit)
-        : this.checkLocal(key, config.windowMs, limit);
-      if (!bucketAllowed) allowed = false;
-    }
+    // One decision for all buckets: the eval increments every key atomically,
+    // and the local fallback checks every key even if the first one rejects.
+    // Otherwise a rejected request could leave one bucket under-counted and let
+    // a later request slip through.
+    const allowed = useRedis
+      ? await this.checkRedis(keys, config.windowMs, limit)
+      : this.checkLocal(keys, config.windowMs, limit);
     if (!allowed) {
       recordMetric('throttle_rejects_total');
       recordMetric(`throttle_rejects_${config.keyPrefix ?? 'global'}`);
@@ -213,42 +219,51 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     );
   }
 
-  private async checkRedis(key: string, windowMs: number, limit: number): Promise<boolean> {
+  private async checkRedis(keys: string[], windowMs: number, limit: number): Promise<boolean> {
     const client = this.redis;
-    if (!client?.isReady) return this.checkLocal(key, windowMs, limit);
+    if (!client?.isReady) return this.checkLocal(keys, windowMs, limit);
     try {
-      const result = (await client.eval(THROTTLE_SCRIPT, {
-        keys: [`${REDIS_KEY_PREFIX}${key}`],
+      const counts = (await client.eval(THROTTLE_SCRIPT, {
+        keys: keys.map(key => `${REDIS_KEY_PREFIX}${key}`),
         arguments: [String(windowMs)],
-      })) as [number, number];
-      this.redisRetryAfter = 0;
-      return Number(result[0]) <= limit;
+      })) as unknown[];
+      // A success must not clear a cooldown that is still active: a late reply
+      // from a previously failed command would otherwise reopen Redis while it
+      // is still flapping. 'ready' and expiry are the only other resume paths.
+      if (Date.now() >= this.redisRetryAfter) this.redisRetryAfter = 0;
+      // Every key is incremented atomically; reject if any bucket is over.
+      return counts.every(count => Number(count) <= limit);
     } catch (err) {
       this.onRedisError(err);
-      // Pause Redis briefly: repeated awaited failures on every request would
-      // add latency and log noise while Redis is down, but a permanent latch
-      // would never notice recovery. The cooldown is also cleared by 'ready'.
-      if (this.redisRetryAfter < Date.now()) this.redisRetryAfter = Date.now() + REDIS_RETRY_MS;
-      return this.checkLocal(key, windowMs, limit);
+      // Extend the cooldown on every failure: a lingering command error must
+      // not clear an already-active deadline. Only 'ready' or expiry resumes
+      // Redis; local fallback limits are per-process during an outage.
+      this.redisRetryAfter = Date.now() + REDIS_RETRY_MS;
+      return this.checkLocal(keys, windowMs, limit);
     }
   }
 
-  private checkLocal(key: string, windowMs: number, limit: number): boolean {
+  private checkLocal(keys: string[], windowMs: number, limit: number): boolean {
     const now = Date.now();
-    let bucket = this.buckets.get(key);
-    if (!bucket || now >= bucket.resetAt) {
-      // Reclaim expired buckets lazily, and evict the oldest entries if the
-      // map hits its cap. Without this, rotating IPs or guest IDs leak memory.
-      this.pruneExpired(now);
-      if (this.buckets.size >= MAX_BUCKETS) {
-        const oldest = this.buckets.keys().next().value;
-        if (oldest !== undefined) this.buckets.delete(oldest);
+    let allowed = true;
+    // Check all buckets even after a rejection so each consumes one token.
+    for (const key of keys) {
+      let bucket = this.buckets.get(key);
+      if (!bucket || now >= bucket.resetAt) {
+        // Reclaim expired buckets lazily, and evict the oldest entries if the
+        // map hits its cap. Without this, rotating IPs or guest IDs leak memory.
+        this.pruneExpired(now);
+        if (this.buckets.size >= MAX_BUCKETS) {
+          const oldest = this.buckets.keys().next().value;
+          if (oldest !== undefined) this.buckets.delete(oldest);
+        }
+        bucket = { count: 0, resetAt: now + windowMs };
+        this.buckets.set(key, bucket);
       }
-      bucket = { count: 0, resetAt: now + windowMs };
-      this.buckets.set(key, bucket);
+      bucket.count++;
+      if (bucket.count > limit) allowed = false;
     }
-    bucket.count++;
-    return bucket.count <= limit;
+    return allowed;
   }
 
   private pruneExpired(now: number): void {
